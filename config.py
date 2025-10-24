@@ -21,3 +21,9 @@ EMA_SLOW         = 50        # 結構過濾：EMA50
 
 # API 基礎
 BINANCE_FUTURES_BASE = "https://fapi.binance.com"  # USDT 永續
+# ===== 實盤連線與風控補充 =====
+# 先用 Futures 測試網驗證，OK 再改成 False
+USE_TESTNET = True
+
+# 限價單等待成交的逾時秒數（逾時會自動撤單）
+ORDER_TIMEOUT_SEC = 90

@@ -27,3 +27,6 @@ USE_TESTNET = True
 
 # 限價單等待成交的逾時秒數（逾時會自動撤單）
 ORDER_TIMEOUT_SEC = 90
+
+# WebSocket 開關：面板即時價
+USE_WEBSOCKET = True

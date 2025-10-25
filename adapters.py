@@ -1,5 +1,5 @@
 import os, hmac, hashlib, requests, time
-from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE
+from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE, ws_best_price
 from config import USE_TESTNET, ORDER_TIMEOUT_SEC
 
 class SimAdapter:
@@ -75,6 +75,9 @@ class LiveAdapter:
     def has_open(self): return self.open is not None
 
     def best_price(self, symbol):
+        p = ws_best_price(symbol)
+        if p is not None:
+            return float(p)
         r = SESSION.get(f"{self.base}/fapi/v1/ticker/price", params={"symbol":symbol}, timeout=5)
         r.raise_for_status()
         return float(r.json()["price"])

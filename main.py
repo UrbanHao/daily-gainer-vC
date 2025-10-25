@@ -92,10 +92,6 @@ def state_iter():
                 cooldown["until"] = time.time() + COOLDOWN_SEC
                 last_bal_ts = 0.0
                 position_view = None
-    # ---- anti-churn / re-entry guard ----
-    COOLDOWN_SEC = 3             # 平倉後全域冷卻，避免下一輪又馬上下單
-    REENTRY_BLOCK_SEC = 45       # 同一幣種平倉後禁止再次進場秒數
-    cooldown = {"until": 0.0, "symbol_lock": {}}
         else:
             # 2) 無持倉：若未停機，掃描與找入場
             if not day.state.halted:

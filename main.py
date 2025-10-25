@@ -34,6 +34,10 @@ def state_iter():
     top10 = []
     events = []
     position_view = None
+    # ---- anti-churn / re-entry guard ----
+    COOLDOWN_SEC = 3             # 平倉後全域冷卻，避免下一輪又馬上下單
+    REENTRY_BLOCK_SEC = 45       # 同一幣種平倉後禁止再次進場秒數
+    cooldown = {"until": 0.0, "symbol_lock": {}}
 
     def log(msg, tag="SYS"):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -84,7 +88,14 @@ def state_iter():
             closed, pct, sym = adapter.poll_and_close_if_hit(day)
             if closed:
                 log(f"CLOSE {sym} pct={pct*100:.2f}% day={day.state.pnl_pct*100:.2f}%")
+                # 冷卻避免馬上下單、並讓下一輪立即抓 balance
+                cooldown["until"] = time.time() + COOLDOWN_SEC
+                last_bal_ts = 0.0
                 position_view = None
+    # ---- anti-churn / re-entry guard ----
+    COOLDOWN_SEC = 3             # 平倉後全域冷卻，避免下一輪又馬上下單
+    REENTRY_BLOCK_SEC = 45       # 同一幣種平倉後禁止再次進場秒數
+    cooldown = {"until": 0.0, "symbol_lock": {}}
         else:
             # 2) 無持倉：若未停機，掃描與找入場
             if not day.state.halted:
@@ -98,8 +109,16 @@ def state_iter():
                         log(f"scan error: {e}", "SCAN")
 
                 # 由上而下找第一個符合量價突破
-                candidate = None
+                # 若還在冷卻，暫不找進場
+                if time.time() < cooldown["until"]:
+                    candidate = None
+                else:
+                    candidate = None
                 for s, pct, last, vol in top10:
+                    # 檢查同幣種 re-entry 鎖
+                    lock_until = cooldown['symbol_lock'].get(s, 0)
+                    if time.time() < lock_until:
+                        continue
                     if volume_breakout_ok(s):
                         candidate = (s, last); break
 

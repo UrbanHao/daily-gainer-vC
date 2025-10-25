@@ -1,4 +1,5 @@
 from rich.table import Table
+from utils import ws_best_price
 from rich.panel import Panel
 from rich.layout import Layout
 from rich.live import Live
@@ -67,3 +68,11 @@ def live_render(loop_iterable):
                 state.get("position"),
                 state.get("events", [])
             ))
+
+def _fmt_last(symbol:str, row_last):
+    p = ws_best_price(symbol)
+    val = p if p is not None else row_last
+    try:
+        return f"{float(val):.6g}"
+    except Exception:
+        return str(val)

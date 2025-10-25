@@ -4,7 +4,7 @@ from datetime import datetime
 import time, os
 from dotenv import load_dotenv
 
-from config import (USE_WEBSOCKET, USE_LIVE, SCAN_INTERVAL_S, DAILY_TARGET_PCT, DAILY_LOSS_CAP,
+from config import (USE_WEBSOCKET, USE_TESTNET, USE_LIVE, SCAN_INTERVAL_S, DAILY_TARGET_PCT, DAILY_LOSS_CAP,
                     PER_TRADE_RISK)
 from utils import fetch_top_gainers, SESSION
 from risk_frame import DayGuard, position_size_notional, compute_bracket
@@ -21,6 +21,9 @@ def state_iter():
     adapter = LiveAdapter() if USE_LIVE else SimAdapter()
 
     last_scan = 0
+    prev_syms = []
+    last_bal_ts = 0.0
+    account = {"equity": equity, "balance": None}
     prev_syms = []
     top10 = []
     events = []
@@ -74,11 +77,20 @@ def state_iter():
                     log(f"OPEN {symbol} qty={qty} entry={entry:.6f}")
 
         # 3) 輸出給面板
+        # 取得 USDT 餘額（Live）
+        if USE_LIVE and (time.time() - last_bal_ts > 10):
+            try:
+                bal = adapter.balance_usdt()
+                account["balance"] = bal
+            except Exception as e:
+                log(f"balance error: {e}")
+            last_bal_ts = time.time()
         yield {
             "top10": top10,
             "day_state": day.state,
             "position": adapter.open if hasattr(adapter, 'open') else None if position_view is None else position_view,
-            "events": events
+            "events": events,
+            "account": account
         }
 
         time.sleep(0.8)

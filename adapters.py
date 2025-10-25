@@ -7,6 +7,14 @@ class SimAdapter:
         self.open = None
     def has_open(self): return self.open is not None
     def best_price(self, symbol):
+        # 先用 WebSocket 快取；沒有才回退 REST
+        try:
+            from utils import ws_best_price
+            p = ws_best_price(symbol)
+            if p is not None:
+                return float(p)
+        except Exception:
+            pass
         r = SESSION.get(f"{BINANCE_FUTURES_BASE}/fapi/v1/ticker/price", params={"symbol":symbol}, timeout=5)
         r.raise_for_status()
         return float(r.json()["price"])
@@ -43,6 +51,20 @@ class LiveAdapter:
         self.base = "https://testnet.binancefuture.com" if USE_TESTNET else BINANCE_FUTURES_BASE
         self.open = None  # {symbol, side, qty, entry, sl, tp, entryId, tpId, slId}
 
+    def balance_usdt(self) -> float:
+        """
+        回傳可用 USDT 餘額；使用 /fapi/v2/balance 簽名端點
+        """
+        arr = self._get("/fapi/v2/balance", {})
+        for a in arr:
+            if a.get("asset") == "USDT":
+                v = a.get("availableBalance") or a.get("balance") or "0"
+                try:
+                    return float(v)
+                except Exception:
+                    return 0.0
+        return 0.0
+        
     def _sign(self, params:dict):
         q = "&".join([f"{k}={params[k]}" for k in sorted(params.keys())])
         sig = hmac.new(self.secret.encode(), q.encode(), hashlib.sha256).hexdigest()

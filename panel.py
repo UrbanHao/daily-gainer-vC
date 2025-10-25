@@ -18,11 +18,14 @@ def build_top10_table(top10):
         t.add_row(str(i), s, f"{pct:.2f}%", f"{last:.6f}", f"{vol:.0f}")
     return t
 
-def build_status_panel(day_state):
+def build_status_panel(day_state, account: dict | None = None):
+    account = account or {}
     txt = Text()
     txt.append(f"Day PnL: {day_state.pnl_pct*100:.2f}%\n")
     txt.append(f"Trades: {day_state.trades}\n")
     txt.append(f"Halted: {day_state.halted}\n")
+    if account.get("testnet"):
+        txt.append("[TESTNET]\n", style="magenta")
     return Panel(txt, title="Status", border_style="green" if not day_state.halted else "red" )
 
 def build_position_panel(position):
@@ -43,7 +46,7 @@ def build_events_panel(events):
         t.add_row(ts, msg)
     return Panel(t, title="Events")
 
-def render_layout(top10, day_state, position, events):
+def render_layout(top10, day_state, position, events, account=None):
     layout = Layout()
     layout.split_column(
         Layout(name="upper", ratio=2),
@@ -51,7 +54,7 @@ def render_layout(top10, day_state, position, events):
     )
     layout["upper"].split_row(
         Layout(build_top10_table(top10), name="top10"),
-        Layout(build_status_panel(day_state), name="status"),
+        Layout(build_status_panel(day_state, account), name="status"),
         Layout(build_position_panel(position), name="pos"),
     )
     layout["lower"].update(build_events_panel(events))
@@ -65,5 +68,6 @@ def live_render(loop_iterable):
                 state.get("top10", []),
                 state["day_state"],
                 state.get("position"),
-                state.get("events", [])
+                state.get("events", []),
+                state.get("account", {})
             ))

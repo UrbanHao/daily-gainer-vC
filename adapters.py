@@ -1,16 +1,27 @@
 import os, hmac, hashlib, requests, time
-from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE,ws_best_price
+from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE
+try:
+    from ws_client import ws_best_price as _ws_best_price
+except Exception:
+    _ws_best_price = None
 from config import USE_TESTNET, ORDER_TIMEOUT_SEC
 
 class SimAdapter:
     def __init__(self):
         self.open = None
     def has_open(self): return self.open is not None
-    def best_price(self, symbol):
-        p = ws_best_price(symbol)
-        if p is not None:
-            return float(p)
-        r = SESSION.get(f"{self.base}/fapi/v1/ticker/price", params={"symbol":symbol}, timeout=5)
+    def best_price(self, symbol: str) -> float:
+        # 先試 WS
+        if _ws_best_price:
+            try:
+                p = _ws_best_price(symbol)
+                if p is not None:
+                    return float(p)
+            except Exception:
+                pass
+        # 後備：REST
+        base = getattr(self, "base", BINANCE_FUTURES_BASE)
+        r = SESSION.get(f"{base}/fapi/v1/ticker/price", params={"symbol": symbol}, timeout=5)
         r.raise_for_status()
         return float(r.json()["price"])
     def place_bracket(self, symbol, side, qty, entry, sl, tp):
@@ -43,7 +54,7 @@ class LiveAdapter:
     def __init__(self):
         self.key = os.getenv("BINANCE_API_KEY", "")
         self.secret = os.getenv("BINANCE_SECRET", "")
-        self.base = "https://testnet.binancefuture.com" if USE_TESTNET else BINANCE_FUTURES_BASE
+        self.base = (BINANCE_FUTURES_TEST_BASE if USE_TESTNET else BINANCE_FUTURES_BASE)
         self.open = None  # {symbol, side, qty, entry, sl, tp, entryId, tpId, slId}
 
     def _sign(self, params:dict):
@@ -86,8 +97,15 @@ class LiveAdapter:
 
     def has_open(self): return self.open is not None
 
-    def best_price(self, symbol):
-        r = SESSION.get(f"{self.base}/fapi/v1/ticker/price", params={"symbol":symbol}, timeout=5)
+    def best_price(self, symbol: str) -> float:
+        if _ws_best_price:
+            try:
+                p = _ws_best_price(symbol)
+                if p is not None:
+                    return float(p)
+            except Exception:
+                pass
+        r = SESSION.get(f"{BINANCE_FUTURES_BASE}/fapi/v1/ticker/price", params={"symbol": symbol}, timeout=5)
         r.raise_for_status()
         return float(r.json()["price"])
 

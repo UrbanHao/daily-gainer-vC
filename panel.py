@@ -1,22 +1,20 @@
 from rich.table import Table
-from utils import ws_best_price
 from rich.panel import Panel
 from rich.layout import Layout
 from rich.live import Live
 from rich.console import Console
 from rich.text import Text
-
-
-# --- 即時價格式化工具：優先取 WS 最新價，失敗回 fallback 值 ---
-def _fmt_last(symbol: str, row_last):
-    p = ws_best_price(symbol)
-    val = p if p is not None else row_last
-    try:
-        return f"{float(val):.6g}"
-    except Exception:
-        return str(val)
+from utils import ws_best_price
 
 console = Console()
+
+def _fmt_last(symbol: str, last_val):
+    p = ws_best_price(symbol)
+    v = p if p is not None else last_val
+    try:
+        return f"{float(v):.6g}"
+    except Exception:
+        return str(v)
 
 def build_top10_table(top10):
     t = Table(title="Top10 Gainers (24h)", expand=True)
@@ -32,27 +30,47 @@ def build_top10_table(top10):
 def build_status_panel(day_state, account: dict | None = None):
     account = account or {}
     txt = Text()
-    bal = account.get("balance")
-    equity = account.get("equity")
-    if equity is not None:
-        txt.append(f"Equity: {float(equity):.2f} USDT\n")
-    if bal is not None:
-        txt.append(f"Balance: {float(bal):.2f} USDT\n")
     txt.append(f"Day PnL: {day_state.pnl_pct*100:.2f}%\n")
     txt.append(f"Trades: {day_state.trades}\n")
     txt.append(f"Halted: {day_state.halted}\n")
     if account.get("testnet"):
         txt.append("[TESTNET]\n", style="magenta")
+    eq = account.get("equity")
+    if eq is not None:
+        txt.append(f"Equity: {float(eq):.2f} USDT\n", style="cyan")
+    bal = account.get("balance")
+    if bal is not None:
+        txt.append(f"Balance: {float(bal):.2f} USDT\n", style="cyan")
     return Panel(txt, title="Status", border_style="green" if not day_state.halted else "red" )
 
 def build_position_panel(position):
     if not position:
         return Panel("No open position", title="Position")
+    sym = position["symbol"]; side = position["side"]
+    qty = position["qty"]; entry = float(position["entry"])
+    tp = float(position["tp"]); sl = float(position["sl"])
     txt = Text()
-    txt.append(f"{position['symbol']} {position['side']}\n")
-    txt.append(f"Qty: {position['qty']}\n")
-    txt.append(f"Entry: {position['entry']:.6f}\n")
-    txt.append(f"TP: {position['tp']:.6f} | SL: {position['sl']:.6f}\n")
+    txt.append(f"{sym} {side}\n")
+    txt.append(f"Qty: {qty}\n")
+    txt.append(f"Entry: {entry:.6f}\n")
+    txt.append(f"TP: {tp:.6f} | SL: {sl:.6f}\n")
+    now_p = ws_best_price(sym) or entry
+    try:
+        now_p = float(now_p)
+        txt.append(f"Now: {now_p:.6f}\n")
+        if entry > 0:
+            if side == "LONG":
+                upnl = (now_p - entry) / entry * 100.0
+                dist_tp = (tp - now_p) / entry * 100.0
+                dist_sl = (now_p - sl) / entry * 100.0
+            else:
+                upnl = (entry - now_p) / entry * 100.0
+                dist_tp = (now_p - tp) / entry * 100.0
+                dist_sl = (sl - now_p) / entry * 100.0
+            txt.append(f"Unrealized PnL: {upnl:.2f}%\n")
+            txt.append(f"To TP: {dist_tp:.2f}% | To SL: {dist_sl:.2f}%\n")
+    except Exception:
+        pass
     return Panel(txt, title="Position", border_style="yellow")
 
 def build_events_panel(events):
@@ -80,7 +98,6 @@ def render_layout(top10, day_state, position, events, account=None):
 def live_render(loop_iterable):
     with Live(refresh_per_second=8, console=console) as live:
         for state in loop_iterable:
-            # state: dict(top10, day_state, position, events)
             live.update(render_layout(
                 state.get("top10", []),
                 state["day_state"],

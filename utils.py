@@ -6,11 +6,18 @@ from config import BINANCE_FUTURES_BASE
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "daily-gainer-bot/vC"})
 
+SESSION.headers.update({"Cache-Control": "no-cache"})
 EXCLUDE_KEYWORDS = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT", "BUSD")
 
 def now_ts_ms():
     return int(datetime.now(timezone.utc).timestamp() * 1000)
-
+# utils.py（任一合適位置）
+def ws_best_price(symbol: str):
+    try:
+        from ws_client import ws_best_price as _ws
+        return _ws(symbol)
+    except Exception:
+        return None
 def fetch_top_gainers(limit=10):
     r = SESSION.get(f"{BINANCE_FUTURES_BASE}/fapi/v1/ticker/24hr", timeout=10)
     r.raise_for_status()

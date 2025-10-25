@@ -12,6 +12,7 @@ from adapters import SimAdapter, LiveAdapter
 from signal_volume_breakout import volume_breakout_ok
 from panel import live_render
 from ws_client import start_ws, stop_ws
+import threading
 from journal import log_trade
 import sys, threading, termios, tty, select
 

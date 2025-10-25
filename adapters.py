@@ -53,7 +53,7 @@ class LiveAdapter:
 
     def balance_usdt(self) -> float:
         """
-        回傳可用 USDT 餘額；使用 /fapi/v2/balance 簽名端點
+        回傳可用 USDT 餘額；/fapi/v2/balance 簽名端點
         """
         arr = self._get("/fapi/v2/balance", {})
         for a in arr:
@@ -97,10 +97,15 @@ class LiveAdapter:
     def has_open(self): return self.open is not None
 
     def best_price(self, symbol):
-        p = ws_best_price(symbol)
-        if p is not None:
-            return float(p)
-        r = SESSION.get(f"{self.base}/fapi/v1/ticker/price", params={"symbol":symbol}, timeout=5)
+        # 先用 WebSocket 快取；沒有才回退 REST
+        try:
+            from utils import ws_best_price
+            p = ws_best_price(symbol)
+            if p is not None:
+                return float(p)
+        except Exception:
+            pass
+        r = SESSION.get(f"{BINANCE_FUTURES_BASE}/fapi/v1/ticker/price", params={"symbol": symbol}, timeout=5)
         r.raise_for_status()
         return float(r.json()["price"])
 

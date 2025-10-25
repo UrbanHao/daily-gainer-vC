@@ -24,7 +24,6 @@ def build_top10_table(top10):
     t.add_column("Last", justify="right")
     t.add_column("Vol", justify="right")
     for i, (s, pct, last, vol) in enumerate(top10, 1):
-        # 用 WS 即時價（有就用；沒有才用 24h 回傳的 last）
         t.add_row(str(i), s, f"{pct:.2f}%", _fmt_last(s, last), f"{vol:.0f}")
     return t
 
@@ -60,12 +59,18 @@ def build_position_panel(position):
     txt.append(f"Entry: {entry:.6f}\n")
     txt.append(f"TP: {tp:.6f} | SL: {sl:.6f}\n")
 
-    now_p = ws_best_price(sym) or entry
+    # 即時價與未實現損益（WS 驅動）
+    now_p = ws_best_price(sym)
+    if now_p is None:
+        now_p = entry
     try:
         now_p = float(now_p)
         txt.append(f"Now: {now_p:.6f}\n")
         if entry > 0:
-            upnl = (now_p - entry) / entry * 100.0 if side == "LONG" else (entry - now_p) / entry * 100.0
+            if side == "LONG":
+                upnl = (now_p - entry) / entry * 100.0
+            else:
+                upnl = (entry - now_p) / entry * 100.0
             txt.append(f"Unrealized PnL: {upnl:.2f}%\n")
     except Exception:
         pass
@@ -97,6 +102,7 @@ def render_layout(top10, day_state, position, events, account=None):
 def live_render(loop_iterable):
     with Live(refresh_per_second=8, console=console) as live:
         for state in loop_iterable:
+            # state: dict(top10, day_state, position, events, account)
             live.update(render_layout(
                 state.get("top10", []),
                 state["day_state"],

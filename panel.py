@@ -1,9 +1,20 @@
 from rich.table import Table
+from utils import ws_best_price
 from rich.panel import Panel
 from rich.layout import Layout
 from rich.live import Live
 from rich.console import Console
 from rich.text import Text
+
+
+# --- 即時價格式化工具：優先取 WS 最新價，失敗回 fallback 值 ---
+def _fmt_last(symbol: str, row_last):
+    p = ws_best_price(symbol)
+    val = p if p is not None else row_last
+    try:
+        return f"{float(val):.6g}"
+    except Exception:
+        return str(val)
 
 console = Console()
 

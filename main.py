@@ -4,11 +4,14 @@ from datetime import datetime
 import time, os
 from dotenv import load_dotenv
 
-from config import (USE_LIVE, SCAN_INTERVAL_S, DAILY_TARGET_PCT, DAILY_LOSS_CAP,
-                    PER_TRADE_RISK)
+from config import (
+    USE_WEBSOCKET, USE_TESTNET, USE_LIVE, SCAN_INTERVAL_S,
+    DAILY_TARGET_PCT, DAILY_LOSS_CAP, PER_TRADE_RISK
+)
 from utils import fetch_top_gainers, SESSION
 from risk_frame import DayGuard, position_size_notional, compute_bracket
 from adapters import SimAdapter, LiveAdapter
+from ws_client import start_ws, stop_ws
 from signal_volume_breakout import volume_breakout_ok
 from panel import live_render
 
@@ -20,6 +23,10 @@ def state_iter():
     adapter = LiveAdapter() if USE_LIVE else SimAdapter()
 
     last_scan = 0
+    prev_syms = []                  # ← 訂閱快取
+    last_bal_ts = 0.0               # ← 抓餘額節流
+    account = {"equity": equity, "balance": None}
+
     top10 = []
     events = []
     position_view = None
@@ -46,6 +53,12 @@ def state_iter():
                         top10 = fetch_top_gainers(10)
                         last_scan = t
                         log("scan top10 ok")
+                        # -- 更新 WebSocket 訂閱（用 USE_TESTNET 切測試網/正式） --
+                        if USE_WEBSOCKET:
+                            syms = [s for (s, _, _, _) in top10]
+                            if syms != prev_syms:
+                                start_ws(syms, USE_TESTNET)
+                                prev_syms = syms
                     except Exception as e:
                         log(f"scan error: {e}")
 
@@ -53,7 +66,8 @@ def state_iter():
                 candidate = None
                 for s, pct, last, vol in top10:
                     if volume_breakout_ok(s):
-                        candidate = (s, last); break
+                        candidate = (s, last)
+                        break
 
                 if candidate:
                     symbol, entry = candidate
@@ -62,18 +76,35 @@ def state_iter():
                     qty = max(round(notional / entry, 3), 0.001)
                     sl, tp = compute_bracket(entry, side)
                     adapter.place_bracket(symbol, side, qty, entry, sl, tp)
-                    position_view = {"symbol":symbol, "side":side, "qty":qty, "entry":entry, "sl":sl, "tp":tp}
+                    position_view = {"symbol": symbol, "side": side, "qty": qty,
+                                     "entry": entry, "sl": sl, "tp": tp}
                     log(f"OPEN {symbol} qty={qty} entry={entry:.6f}")
+
+        # 取得 USDT 餘額（只在 Live；每 10 秒）
+        if USE_LIVE and time.time() - last_bal_ts > 10:
+            try:
+                bal = adapter.balance_usdt()
+                account["balance"] = bal
+            except Exception as e:
+                log(f"balance error: {e}")
+            last_bal_ts = time.time()
 
         # 3) 輸出給面板
         yield {
             "top10": top10,
             "day_state": day.state,
-            "position": adapter.open if hasattr(adapter, 'open') else None if position_view is None else position_view,
-            "events": events
+            "position": adapter.open if hasattr(adapter, 'open') and adapter.open else position_view,
+            "events": events,
+            "account": account,
         }
 
         time.sleep(0.8)
 
 if __name__ == "__main__":
-    live_render(state_iter())
+    try:
+        live_render(state_iter())
+    finally:
+        try:
+            stop_ws()
+        except Exception:
+            pass

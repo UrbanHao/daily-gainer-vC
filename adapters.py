@@ -1,5 +1,5 @@
 import os, hmac, hashlib, requests, time
-from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE
+from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE, ws_best_price
 from config import USE_TESTNET, ORDER_TIMEOUT_SEC
 
 class SimAdapter:
@@ -7,6 +7,14 @@ class SimAdapter:
         self.open = None
     def has_open(self): return self.open is not None
     def best_price(self, symbol):
+        # 先用 WebSocket 快取；沒有才回退 REST
+        try:
+            from utils import ws_best_price
+            p = ws_best_price(symbol)
+            if p is not None:
+                return float(p)
+        except Exception:
+            pass
         r = SESSION.get(f"{BINANCE_FUTURES_BASE}/fapi/v1/ticker/price", params={"symbol":symbol}, timeout=5)
         r.raise_for_status()
         return float(r.json()["price"])
@@ -15,9 +23,7 @@ class SimAdapter:
         return "SIM-ORDER"
     def poll_and_close_if_hit(self, day_guard):
         if not self.open: return False, None, None
-        r = SESSION.get(f"{BINANCE_FUTURES_BASE}/fapi/v1/ticker/price", params={"symbol":self.open["symbol"]}, timeout=5)
-        r.raise_for_status()
-        p = float(r.json()["price"])
+        p = self.best_price(self.open["symbol"])
         side = self.open["side"]
         hit_tp = (p >= self.open["tp"]) if side=="LONG" else (p <= self.open["tp"])
         hit_sl = (p <= self.open["sl"]) if side=="LONG" else (p >= self.open["sl"])
@@ -33,8 +39,11 @@ class SimAdapter:
 
 class LiveAdapter:
     """
-    Binance USDT-M Futures — 限價進場 + 兩條互斥條件單（TP/SL, closePosition=true）
-    單向倉邏輯；先用測試網 (USE_TESTNET=True) 驗證全流程。
+    Binance USDT-M Futures — 限價進場 + 兩條互斥條件單（TP/SL，closePosition=true）
+    流程：
+      1) LIMIT 進場（GTC），等待成交（逾時撤單）
+      2) 成交後同時掛 TAKE_PROFIT_MARKET 與 STOP_MARKET（closePosition=true）
+      3) 任一成交後撤另一單，回報 PnL%
     """
     def __init__(self):
         self.key = os.getenv("BINANCE_API_KEY", "")
@@ -42,16 +51,33 @@ class LiveAdapter:
         self.base = "https://testnet.binancefuture.com" if USE_TESTNET else BINANCE_FUTURES_BASE
         self.open = None  # {symbol, side, qty, entry, sl, tp, entryId, tpId, slId}
 
+    def balance_usdt(self) -> float:
+        """
+        回傳可用 USDT 餘額；/fapi/v2/balance 簽名端點
+        """
+        arr = self._get("/fapi/v2/balance", {})
+        for a in arr:
+            if a.get("asset") == "USDT":
+                v = a.get("availableBalance") or a.get("balance") or "0"
+                try:
+                    return float(v)
+                except Exception:
+                    return 0.0
+        return 0.0
+        
     def _sign(self, params:dict):
         q = "&".join([f"{k}={params[k]}" for k in sorted(params.keys())])
         sig = hmac.new(self.secret.encode(), q.encode(), hashlib.sha256).hexdigest()
         return q + "&signature=" + sig
+
     def _post(self, path, params):
+        params = dict(params)
         params["timestamp"] = now_ts_ms()
         qs = self._sign(params)
         r = SESSION.post(f"{self.base}{path}?{qs}", headers={"X-MBX-APIKEY": self.key}, timeout=10)
         r.raise_for_status()
         return r.json()
+
     def _get(self, path, params):
         params = dict(params or {})
         params["timestamp"] = now_ts_ms()
@@ -59,7 +85,9 @@ class LiveAdapter:
         r = SESSION.get(f"{self.base}{path}?{qs}", headers={"X-MBX-APIKEY": self.key}, timeout=10)
         r.raise_for_status()
         return r.json()
+
     def _delete(self, path, params):
+        params = dict(params or {})
         params["timestamp"] = now_ts_ms()
         qs = self._sign(params)
         r = SESSION.delete(f"{self.base}{path}?{qs}", headers={"X-MBX-APIKEY": self.key}, timeout=10)
@@ -67,22 +95,26 @@ class LiveAdapter:
         return r.json()
 
     def has_open(self): return self.open is not None
+
     def best_price(self, symbol):
-        r = SESSION.get(f"{self.base}/fapi/v1/ticker/price", params={"symbol":symbol}, timeout=5)
+        # 先用 WebSocket 快取；沒有才回退 REST
+        try:
+            from utils import ws_best_price
+            p = ws_best_price(symbol)
+            if p is not None:
+                return float(p)
+        except Exception:
+            pass
+        r = SESSION.get(f"{BINANCE_FUTURES_BASE}/fapi/v1/ticker/price", params={"symbol": symbol}, timeout=5)
         r.raise_for_status()
         return float(r.json()["price"])
 
     def place_bracket(self, symbol, side, qty, entry, sl, tp):
-        """
-        1) 限價進場（GTC）
-        2) 等待成交（逾時自動撤單）
-        3) 成交後掛 reduceOnly 出場單：TAKE_PROFIT_MARKET 與 STOP_MARKET（closePosition=true）
-        """
         if side not in ("LONG","SHORT"):
             raise ValueError("side must be LONG/SHORT")
         order_side = "BUY" if side=="LONG" else "SELL"
 
-        # 1) 限價進場
+        # 1) 限價進場（GTC）
         entry_params = {
             "symbol": symbol,
             "side": order_side,
@@ -111,7 +143,7 @@ class LiveAdapter:
                 self.open = None
             raise TimeoutError("Entry limit order not filled within timeout; canceled.")
 
-        # 3) 掛 TP/SL（closePosition=true 以整倉平倉；等同 reduce-only 全部倉位）
+        # 3) 成交後掛 TP/SL — closePosition(true) 等同 reduceOnly 全倉
         exit_side = "SELL" if side=="LONG" else "BUY"
         tp_res = self._post("/fapi/v1/order", {
             "symbol": symbol,
@@ -139,9 +171,6 @@ class LiveAdapter:
         return str(entry_id)
 
     def poll_and_close_if_hit(self, day_guard):
-        """
-        查詢 TP/SL 狀態；若任一成交，計算 PnL，撤另一條，回報 DayGuard
-        """
         if not self.open: return False, None, None
         symbol = self.open["symbol"]
         side   = self.open["side"]
@@ -161,6 +190,7 @@ class LiveAdapter:
         pct = (exit_price - entry) / entry
         if side == "SHORT": pct = -pct
 
+        # 撤另一條未成交單
         try:
             other_id = slId if tp_filled else tpId
             other_q  = self._get("/fapi/v1/order", {"symbol":symbol, "orderId":other_id})

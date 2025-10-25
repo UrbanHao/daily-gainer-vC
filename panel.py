@@ -1,4 +1,5 @@
 from rich.table import Table
+from utils import ws_best_price
 from rich.panel import Panel
 from rich.layout import Layout
 from rich.live import Live
@@ -6,6 +7,14 @@ from rich.console import Console
 from rich.text import Text
 
 console = Console()
+
+def _fmt_last(symbol: str, row_last):
+    p = ws_best_price(symbol)
+    val = p if p is not None else row_last
+    try:
+        return f"{float(val):.6g}"
+    except Exception:
+        return str(val)
 
 def build_top10_table(top10):
     t = Table(title="Top10 Gainers (24h)", expand=True)
@@ -15,24 +24,57 @@ def build_top10_table(top10):
     t.add_column("Last", justify="right")
     t.add_column("Vol", justify="right")
     for i, (s, pct, last, vol) in enumerate(top10, 1):
-        t.add_row(str(i), s, f"{pct:.2f}%", f"{last:.6f}", f"{vol:.0f}")
+        t.add_row(str(i), s, f"{pct:.2f}%", _fmt_last(s, last), f"{vol:.0f}")
     return t
 
-def build_status_panel(day_state):
+def build_status_panel(day_state, account: dict | None = None):
+    account = account or {}
     txt = Text()
     txt.append(f"Day PnL: {day_state.pnl_pct*100:.2f}%\n")
     txt.append(f"Trades: {day_state.trades}\n")
     txt.append(f"Halted: {day_state.halted}\n")
-    return Panel(txt, title="Status", border_style="green" if not day_state.halted else "red" )
+    # 顯示 Equity / Balance
+    equity = account.get("equity")
+    if equity is not None:
+        txt.append(f"Equity: {float(equity):.2f} USDT\n", style="cyan")
+    bal = account.get("balance")
+    if bal is not None:
+        txt.append(f"Balance: {float(bal):.2f} USDT\n", style="cyan")
+    return Panel(txt, title="Status", border_style="green" if not day_state.halted else "red")
 
 def build_position_panel(position):
     if not position:
         return Panel("No open position", title="Position")
     txt = Text()
-    txt.append(f"{position['symbol']} {position['side']}\n")
-    txt.append(f"Qty: {position['qty']}\n")
-    txt.append(f"Entry: {position['entry']:.6f}\n")
-    txt.append(f"TP: {position['tp']:.6f} | SL: {position['sl']:.6f}\n")
+    sym = position["symbol"]
+    side = position["side"]
+    qty = position.get("qty")
+    entry = float(position.get("entry", 0) or 0.0)
+    tp = float(position.get("tp", 0) or 0.0)
+    sl = float(position.get("sl", 0) or 0.0)
+
+    txt.append(f"{sym} {side}\n")
+    if qty is not None:
+        txt.append(f"Qty: {qty}\n")
+    txt.append(f"Entry: {entry:.6f}\n")
+    txt.append(f"TP: {tp:.6f} | SL: {sl:.6f}\n")
+
+    # 即時價與未實現損益（WS 驅動）
+    now_p = ws_best_price(sym)
+    if now_p is None:
+        now_p = entry
+    try:
+        now_p = float(now_p)
+        txt.append(f"Now: {now_p:.6f}\n")
+        if entry > 0:
+            if side == "LONG":
+                upnl = (now_p - entry) / entry * 100.0
+            else:
+                upnl = (entry - now_p) / entry * 100.0
+            txt.append(f"Unrealized PnL: {upnl:.2f}%\n")
+    except Exception:
+        pass
+
     return Panel(txt, title="Position", border_style="yellow")
 
 def build_events_panel(events):
@@ -43,7 +85,7 @@ def build_events_panel(events):
         t.add_row(ts, msg)
     return Panel(t, title="Events")
 
-def render_layout(top10, day_state, position, events):
+def render_layout(top10, day_state, position, events, account=None):
     layout = Layout()
     layout.split_column(
         Layout(name="upper", ratio=2),
@@ -51,7 +93,7 @@ def render_layout(top10, day_state, position, events):
     )
     layout["upper"].split_row(
         Layout(build_top10_table(top10), name="top10"),
-        Layout(build_status_panel(day_state), name="status"),
+        Layout(build_status_panel(day_state, account), name="status"),
         Layout(build_position_panel(position), name="pos"),
     )
     layout["lower"].update(build_events_panel(events))
@@ -60,10 +102,11 @@ def render_layout(top10, day_state, position, events):
 def live_render(loop_iterable):
     with Live(refresh_per_second=8, console=console) as live:
         for state in loop_iterable:
-            # state: dict(top10, day_state, position, events)
+            # state: dict(top10, day_state, position, events, account)
             live.update(render_layout(
                 state.get("top10", []),
                 state["day_state"],
                 state.get("position"),
-                state.get("events", [])
+                state.get("events", []),
+                state.get("account", {})
             ))

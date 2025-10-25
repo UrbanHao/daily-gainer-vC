@@ -49,3 +49,11 @@ def ema(vals, n):
     for v in vals[1:]:
         e = v*k + e*(1-k)
     return e
+
+# === WebSocket 快取輔助 ===
+def ws_best_price(symbol: str):
+    try:
+        from ws_client import get_price
+        return get_price(symbol)
+    except Exception:
+        return None

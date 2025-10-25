@@ -15,12 +15,18 @@ def build_top10_table(top10):
     t.add_column("Last", justify="right")
     t.add_column("Vol", justify="right")
     for i, (s, pct, last, vol) in enumerate(top10, 1):
-        t.add_row(str(i), s, f"{pct:.2f}%", f"{last:.6f}", f"{vol:.0f}")
+        t.add_row(str(i), s, f"{pct:.2f}%", _fmt_last(s, last), f"{vol:.0f}")
     return t
 
 def build_status_panel(day_state, account: dict | None = None):
     account = account or {}
     txt = Text()
+    bal = account.get("balance")
+    equity = account.get("equity")
+    if equity is not None:
+        txt.append(f"Equity: {float(equity):.2f} USDT\n")
+    if bal is not None:
+        txt.append(f"Balance: {float(bal):.2f} USDT\n")
     txt.append(f"Day PnL: {day_state.pnl_pct*100:.2f}%\n")
     txt.append(f"Trades: {day_state.trades}\n")
     txt.append(f"Halted: {day_state.halted}\n")

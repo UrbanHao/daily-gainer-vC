@@ -1,5 +1,5 @@
 import os, hmac, hashlib, requests, time
-from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE
+from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE,ws_best_price
 from config import USE_TESTNET, ORDER_TIMEOUT_SEC
 
 class SimAdapter:
@@ -7,7 +7,10 @@ class SimAdapter:
         self.open = None
     def has_open(self): return self.open is not None
     def best_price(self, symbol):
-        r = SESSION.get(f"{BINANCE_FUTURES_BASE}/fapi/v1/ticker/price", params={"symbol":symbol}, timeout=5)
+        p = ws_best_price(symbol)
+        if p is not None:
+            return float(p)
+        r = SESSION.get(f"{self.base}/fapi/v1/ticker/price", params={"symbol":symbol}, timeout=5)
         r.raise_for_status()
         return float(r.json()["price"])
     def place_bracket(self, symbol, side, qty, entry, sl, tp):
@@ -47,7 +50,16 @@ class LiveAdapter:
         q = "&".join([f"{k}={params[k]}" for k in sorted(params.keys())])
         sig = hmac.new(self.secret.encode(), q.encode(), hashlib.sha256).hexdigest()
         return q + "&signature=" + sig
-
+    def balance_usdt(self) -> float:
+        arr = self._get("/fapi/v2/balance", {})
+        for a in arr:
+            if a.get("asset") == "USDT":
+                v = a.get("availableBalance") or a.get("balance") or "0"
+                try:
+                    return float(v)
+                except Exception:
+                    return 0.0
+        return 0.0
     def _post(self, path, params):
         params = dict(params)
         params["timestamp"] = now_ts_ms()

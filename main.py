@@ -11,6 +11,9 @@ from risk_frame import DayGuard, position_size_notional, compute_bracket
 from adapters import SimAdapter, LiveAdapter
 from signal_volume_breakout import volume_breakout_ok
 from panel import live_render
+from ws_client import start_ws, stop_ws
+from journal import log_trade
+import sys, threading, termios, tty, select
 
 def state_iter():
     # hotkeys local imports (ensure available even if top-level imports failed)
@@ -113,12 +116,18 @@ def state_iter():
         yield {
             "top10": top10,
             "day_state": day.state,
-            "position": adapter.open if hasattr(adapter, 'open') else None if position_view is None else position_view,
+            "position": adapter.open if hasattr(adapter, "open") else (None if position_view is None else position_view),
             "events": events,
-            "account": account
+            "account": account,
         }
 
         time.sleep(0.8)
 
 if __name__ == "__main__":
-    live_render(state_iter())
+    try:
+        live_render(state_iter())
+    finally:
+        try:
+            stop_ws()
+        except Exception:
+            pass

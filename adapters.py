@@ -1,5 +1,7 @@
 import os, hmac, hashlib, requests, time
-from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE, TIME_OFFSET_MS, BINANCE_FUTURES_BASE, safe_get_json, ws_best_price
+from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE
+from dotenv import dotenv_values
+import os
 try:
     from ws_client import ws_best_price as _ws_best_price
 except Exception:
@@ -84,6 +86,10 @@ class LiveAdapter:
         return r.json()
 
     def _get(self, path, params):
+        # 私有端點需要 key/secret；公開端點不檢查
+        if path.startswith("/fapi/") and ("balance" in path or "account" in path or "order" in path):
+            if not (getattr(self, "api_key", None) and getattr(self, "api_secret", None)):
+                raise RuntimeError("Missing Binance Futures API key/secret. Set BINANCE_API_KEY / BINANCE_API_SECRET in environment or .env")
         params = dict(params or {})
         params["timestamp"] = now_ts_ms() + int(TIME_OFFSET_MS)
         params.setdefault("recvWindow", 60000)

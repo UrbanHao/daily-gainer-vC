@@ -22,6 +22,7 @@ def state_iter():
 
     load_dotenv(override=True)
     equity = float(os.getenv("EQUITY_USDT", "10000"))
+    start_equity = equity
 
     day = DayGuard()
     adapter = LiveAdapter() if USE_LIVE else SimAdapter()
@@ -139,6 +140,15 @@ def state_iter():
                     log(f"OPEN {symbol} qty={qty} entry={entry:.6f}", "ORDER")
                     cooldown["until"] = time.time() + COOLDOWN_SEC
                     cooldown["symbol_lock"][symbol] = time.time() + REENTRY_BLOCK_SEC
+
+        # 依照可用資訊更新 Equity：有 balance 用 balance，否則用起始本金 * (1 + 當日% 報酬)
+        try:
+            pnl = float(getattr(day.state, "pnl_pct", 0.0) or 0.0)
+        except Exception:
+            pnl = 0.0
+        account["equity"] = (account.get("balance")
+                              if account.get("balance") is not None
+                              else start_equity * (1.0 + pnl))
 
         # 3) 輸出給面板
         yield {

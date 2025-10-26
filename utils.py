@@ -1,6 +1,6 @@
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import time
+import time, math
 import statistics
 import requests
 from datetime import datetime, timezone
@@ -11,7 +11,32 @@ SESSION.headers.update({"User-Agent": "daily-gainer-bot/vC"})
 
 SESSION.headers.update({"Cache-Control": "no-cache"})
 EXCLUDE_KEYWORDS = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT", "BUSD")
+# 用於緩存所有幣種的精度規則
+EXCHANGE_INFO = {}
 
+def load_exchange_info():
+    """
+    在啟動時呼叫一次，獲取並緩存所有交易對的精度規則。
+    """
+    global EXCHANGE_INFO
+    if EXCHANGE_INFO: return # 避免重複載入
+    try:
+        # 使用 _rest_json 來獲取 exchangeInfo
+        info = _rest_json("/fapi/v1/exchangeInfo")
+        data = {}
+        for s in info.get("symbols", []):
+            if s.get('status') != 'TRADING':
+                continue
+            data[s['symbol']] = {
+                'pricePrecision': s.get('pricePrecision', 8),     # 價格小數位
+                'quantityPrecision': s.get('quantityPrecision', 8), # 數量小數位
+            }
+        EXCHANGE_INFO = data
+        print(f"--- 成功載入 {len(EXCHANGE_INFO)} 個幣種的精度規則 ---")
+    except Exception as e:
+        print(f"--- 致命錯誤：無法載入 Exchange Info: {e} ---")
+        print("--- 程式可能因無法獲取精度而下單失敗 ---")
+        # 在真實環境中，這裡應該 raise e 讓程式停止
 def now_ts_ms():
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 # utils.py（任一合適位置）

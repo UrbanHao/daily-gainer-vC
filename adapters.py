@@ -1,5 +1,5 @@
 import os, hmac, hashlib, requests, time
-from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE, TIME_OFFSET_MS, safe_get_json, ws_best_price
+from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE, TIME_OFFSET_MS, safe_get_json, ws_best_price, EXCHANGE_INFO
 try:
     TIME_OFFSET_MS
 except NameError:
@@ -148,14 +148,22 @@ class LiveAdapter:
             raise ValueError("side must be LONG/SHORT")
         order_side = "BUY" if side=="LONG" else "SELL"
 
-        # 1) 限價進場（GTC）
+        # --- 修正：使用 f-string 精度格式化 ---
+        try:
+            # 從緩存獲取該幣種的精度
+            prec = EXCHANGE_INFO[symbol]
+            qty_prec = prec['quantityPrecision']
+            price_prec = prec['pricePrecision']
+        except KeyError:
+            qty_prec, price_prec = 0, 4 # Fallback
+
         entry_params = {
             "symbol": symbol,
             "side": order_side,
             "type": "LIMIT",
             "timeInForce": "GTC",
-            "quantity": f"{qty}",
-            "price": f"{entry}",
+            "quantity": f"{qty:.{qty_prec}f}",  # <--- 修改點
+            "price": f"{entry:.{price_prec}f}", # <--- 修改點
             "newClientOrderId": f"entry_{int(time.time())}"
         }
         entry_res = self._post("/fapi/v1/order", entry_params)
@@ -183,7 +191,7 @@ class LiveAdapter:
             "symbol": symbol,
             "side": exit_side,
             "type": "TAKE_PROFIT_MARKET",
-            "stopPrice": f"{tp}",
+            "stopPrice": f"{tp:.{price_prec}f}", # <--- 修改點
             "closePosition": "true",
             "workingType": "CONTRACT_PRICE"
         })
@@ -191,7 +199,7 @@ class LiveAdapter:
             "symbol": symbol,
             "side": exit_side,
             "type": "STOP_MARKET",
-            "stopPrice": f"{sl}",
+            "stopPrice": f"{sl:.{price_prec}f}", # <--- 修改點
             "closePosition": "true",
             "workingType": "CONTRACT_PRICE"
         })

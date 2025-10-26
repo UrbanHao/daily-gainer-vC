@@ -14,13 +14,15 @@ from panel import live_render
 from ws_client import start_ws, stop_ws
 import threading
 from journal import log_trade
-import sys, threading, termios, tty, select
+import sys, threading, termios, tty, select, math
+from utils import load_exchange_info, EXCHANGE_INFO
 
 def state_iter():
     # hotkeys local imports (ensure available even if top-level imports failed)
     import sys, threading, termios, tty, select  # hotkeys
 
     load_dotenv(override=True)
+    load_exchange_info() # <-- 新增：在啟動時載入精度規則
 
     day = DayGuard()
     adapter = LiveAdapter() if USE_LIVE else SimAdapter()
@@ -161,26 +163,35 @@ def state_iter():
                     side = "LONG"
                     notional = position_size_notional(equity)
 
-                    # --- 修正精度錯誤 ---
+                    # --- 修正：使用 ExchangeInfo 進行精確計算 ---
+                    try:
+                        # 1. 從緩存獲取該幣種的精度
+                        prec = EXCHANGE_INFO[symbol]
+                        qty_prec = prec['quantityPrecision']
+                        price_prec = prec['pricePrecision']
+                    except KeyError:
+                        # 如果 exchangeInfo 找不到 (極少發生)，使用保守猜測
+                        log(f"No exchange info for {symbol}, using defaults", "ERR")
+                        qty_prec, price_prec = 0, 4 # 猜測：數量取整，價格 4 位
                     
-                    # 1. 修正 Qty 精度：
-                    #    硬寫 3 位小數 (0.001) 太危險。對多數山寨幣，1 位 (0.1) 是更安全的猜測。
-                    #    (這仍然是猜測，但比 3 好)
-                    qty = max(round(notional / entry, 1), 0.1)
+                    # 2. 計算並格式化 Qty (數量)
+                    # 數量必須用 math.floor 進行「無條件捨去」到指定精度
+                    qty_raw = notional / entry
+                    qty_factor = 10**qty_prec
+                    qty = math.floor(qty_raw * qty_factor) / qty_factor
 
-                    sl, tp = compute_bracket(entry, side)
+                    if qty == 0.0:
+                        log(f"Skipping {symbol}, calculated qty is zero (Notional={notional:.2f})", "SYS")
+                        cooldown["until"] = time.time() + 1 # 避免
+                        continue # 跳過此候選
 
-                    # 2. 修正 SL/TP 價格精度：
-                    #    我們必須將 SL/TP 四捨五入到有效的小數位。
-                    #    最佳猜測是 "參照進場價 (entry) 的小數位數"。
-                    s_entry = f"{entry:.10g}" # 將 entry 轉為字串
-                    if '.' in s_entry:
-                        price_precision = len(s_entry.split('.')[-1])
-                    else:
-                        price_precision = 0 # 處理像 BTC 這樣的整數價格
+                    # 3. 計算並格式化 Price (價格)
+                    # 價格使用 round (四捨五入) 到指定精度
+                    sl_raw, tp_raw = compute_bracket(entry, side)
                     
-                    sl = round(sl, price_precision)
-                    tp = round(tp, price_precision)
+                    sl = round(sl_raw, price_prec)
+                    tp = round(tp_raw, price_prec)
+                    entry = round(entry, price_prec) # 也格式化 entry
                     
                     # --- 修正結束 ---
 

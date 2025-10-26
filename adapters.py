@@ -1,5 +1,5 @@
 import os, hmac, hashlib, requests, time
-from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE, BINANCE_FUTURES_BASE, safe_get_json, ws_best_price
+from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE, TIME_OFFSET_MS, BINANCE_FUTURES_BASE, safe_get_json, ws_best_price
 try:
     from ws_client import ws_best_price as _ws_best_price
 except Exception:
@@ -76,7 +76,8 @@ class LiveAdapter:
         return 0.0
     def _post(self, path, params):
         params = dict(params)
-        params["timestamp"] = now_ts_ms()
+        params["timestamp"] = now_ts_ms() + int(TIME_OFFSET_MS)
+        params.setdefault("recvWindow", 60000)
         qs = self._sign(params)
         r = SESSION.post(f"{self.base}{path}?{qs}", headers={"X-MBX-APIKEY": self.key}, timeout=10)
         r.raise_for_status()
@@ -84,7 +85,8 @@ class LiveAdapter:
 
     def _get(self, path, params):
         params = dict(params or {})
-        params["timestamp"] = now_ts_ms()
+        params["timestamp"] = now_ts_ms() + int(TIME_OFFSET_MS)
+        params.setdefault("recvWindow", 60000)
         qs = self._sign(params)
         r = SESSION.get(f"{self.base}{path}?{qs}", headers={"X-MBX-APIKEY": self.key}, timeout=10)
         r.raise_for_status()
@@ -92,7 +94,8 @@ class LiveAdapter:
 
     def _delete(self, path, params):
         params = dict(params or {})
-        params["timestamp"] = now_ts_ms()
+        params["timestamp"] = now_ts_ms() + int(TIME_OFFSET_MS)
+        params.setdefault("recvWindow", 60000)
         qs = self._sign(params)
         r = SESSION.delete(f"{self.base}{path}?{qs}", headers={"X-MBX-APIKEY": self.key}, timeout=10)
         r.raise_for_status()

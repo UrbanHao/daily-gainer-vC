@@ -4,7 +4,7 @@ import time, math
 import statistics
 import requests
 from datetime import datetime, timezone
-from config import BINANCE_FUTURES_BASE
+from config import BINANCE_FUTURES_BASE, SYMBOL_BLACKLIST
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "daily-gainer-bot/vC"})
@@ -53,6 +53,12 @@ def fetch_top_gainers(limit=10):
         s = x.get("symbol", "")
         if (not s.endswith("USDT")) or any(k in s for k in EXCLUDE_KEYWORDS):
             continue
+        
+        # --- 新增：檢查黑名單 ---
+        if s in SYMBOL_BLACKLIST:
+            continue
+        # --- 結束 ---
+
         try:
             pct = float(x.get("priceChangePercent", 0.0))
             last = float(x.get("lastPrice", 0.0))

@@ -1,5 +1,5 @@
 import os, hmac, hashlib, requests, time
-from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE
+from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE, BINANCE_FUTURES_TEST_BASE, safe_get_json, ws_best_price
 try:
     from ws_client import ws_best_price as _ws_best_price
 except Exception:
@@ -29,7 +29,10 @@ class SimAdapter:
         return "SIM-ORDER"
     def poll_and_close_if_hit(self, day_guard):
         if not self.open: return False, None, None
-        p = self.best_price(self.open["symbol"])
+        try:
+            p = self.best_price(self.open["symbol"])
+        except Exception as _e:
+            return False, None, None
         side = self.open["side"]
         hit_tp = (p >= self.open["tp"]) if side=="LONG" else (p <= self.open["tp"])
         hit_sl = (p <= self.open["sl"]) if side=="LONG" else (p >= self.open["sl"])

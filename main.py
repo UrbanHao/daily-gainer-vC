@@ -15,7 +15,7 @@ from ws_client import start_ws, stop_ws
 import threading
 from journal import log_trade
 import sys, threading, termios, tty, select, math
-from utils import load_exchange_info, EXCHANGE_INFO
+from utils import load_exchange_info, EXCHANGE_INFO, update_time_offset
 
 def state_iter():
     # hotkeys local imports (ensure available even if top-level imports failed)
@@ -42,6 +42,7 @@ def state_iter():
         
     start_equity = equity
     last_scan = 0
+    last_time_sync = time.time() # <-- 新增：記錄啟動時間
     prev_syms = []
     last_bal_ts = 0.0
     account = {"equity": equity, "balance": None, "testnet": USE_TESTNET}
@@ -96,7 +97,18 @@ def state_iter():
 
 
     while True:
+        t_now = time.time() # 取得一次當前時間
         day.rollover()
+        # --- 新增：修復時間漂移 (Issue #2) ---
+        if t_now - last_time_sync > 1800: # 每 30 分鐘 (1800 秒)
+            try:
+                new_offset = update_time_offset()
+                log(f"Time offset re-synced: {new_offset} ms", "SYS")
+                last_time_sync = t_now
+            except Exception as e:
+                log(f"Time offset sync failed: {e}", "ERROR")
+                last_time_sync = t_now # 即使失敗也更新時間，避免 0.8s 後重試
+        # --- 結束 ---
 
                 # 1) 平倉監控
         if adapter.has_open():
@@ -131,11 +143,11 @@ def state_iter():
             # 2) 無持倉：若未停機，掃描與找入場
             
             if not day.state.halted:
-                t = time.time()
-                if not paused["scan"] and (t - last_scan > SCAN_INTERVAL_S):
+                # t = time.time() # <-- 這行可以刪了
+                if not paused["scan"] and (t_now - last_scan > SCAN_INTERVAL_S):
                     try:
                         top10 = fetch_top_gainers(10)
-                        last_scan = t
+                        last_scan = t_now # <--- 修正點
                         log("top10 ok", "SCAN")
                         if USE_WEBSOCKET:
                             syms = [t[0] for t in top10]
@@ -195,11 +207,21 @@ def state_iter():
                     
                     # --- 修正結束 ---
 
-                    adapter.place_bracket(symbol, side, qty, entry, sl, tp)
-                    position_view = {"symbol":symbol, "side":side, "qty":qty, "entry":entry, "sl":sl, "tp":tp}
-                    log(f"OPEN {symbol} qty={qty} entry={entry:.6f}", "ORDER")
-                    cooldown["until"] = time.time() + COOLDOWN_SEC
-                    cooldown["symbol_lock"][symbol] = time.time() + REENTRY_BLOCK_SEC
+                    try:
+                        # --- 修復：捕捉下單時的所有錯誤 (Issue #1) ---
+                        adapter.place_bracket(symbol, side, qty, entry, sl, tp)
+                        
+                        # 只有在下單成功時，才執行以下動作
+                        position_view = {"symbol":symbol, "side":side, "qty":qty, "entry":entry, "sl":sl, "tp":tp}
+                        log(f"OPEN {symbol} qty={qty} entry={entry:.6f}", "ORDER")
+                        cooldown["until"] = time.time() + COOLDOWN_SEC
+                        cooldown["symbol_lock"][symbol] = time.time() + REENTRY_BLOCK_SEC
+
+                    except Exception as e:
+                        # 捕捉 TimeoutError, HTTPError, Insufficient Margin 等
+                        log(f"ORDER FAILED for {symbol}: {e}", "ERROR")
+                        # (發生錯誤時，我們只記錄日誌，然後繼續下一輪迴圈，程式不再崩潰)
+                        pass
 
         # 依照可用資訊更新 Equity (顯示用)
         # (實際的 equity 變數已在啟動時和平倉後更新)

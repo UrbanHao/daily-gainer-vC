@@ -137,9 +137,18 @@ def _fapi_server_time_ms():
     except Exception:
         return now_ts_ms()
 
-try:
-    _local = now_ts_ms()
-    _server = _fapi_server_time_ms()
-    TIME_OFFSET_MS = _server - _local
-except Exception:
-    TIME_OFFSET_MS = 0
+TIME_OFFSET_MS = 0 # 先宣告為全域變數
+
+def update_time_offset():
+    """重新計算並更新全域的 TIME_OFFSET_MS"""
+    global TIME_OFFSET_MS
+    try:
+        _local = now_ts_ms()
+        _server = _fapi_server_time_ms()
+        TIME_OFFSET_MS = _server - _local
+        return TIME_OFFSET_MS
+    except Exception:
+        return TIME_OFFSET_MS # 同步失敗時，維持舊的 offset
+
+# 啟動時執行第一次校正
+update_time_offset()

@@ -1,12 +1,12 @@
 # ================= 基本參數 =================
-DAILY_TARGET_PCT = 0.9     # 當日達標 +1.5%
-DAILY_LOSS_CAP   = -0.9     # 當日最大虧損 -2%
+DAILY_TARGET_PCT = 0.15     # 當日達標 +1.5%
+DAILY_LOSS_CAP   = -0.05     # 當日最大虧損 -2%
 PER_TRADE_RISK   = 0.0075    # 每筆風險 0.75% 權益
 TP_PCT           = 0.015     # 單筆停利 +1.5%
 SL_PCT           = 0.0075    # 單筆止損 -0.75%
-MAX_TRADES_DAY   = 6         # 每日最多交易筆數
+MAX_TRADES_DAY   = 10         # 每日最多交易筆數
 SCAN_INTERVAL_S  = 10        # Top10 刷新頻率（秒）
-USE_LIVE         = False     # 先跑模擬；接實盤請改 True
+USE_LIVE         = True     # 先跑模擬；接實盤請改 True
 
 # ================= 訊號參數（版本 C） =================
 KLINE_INTERVAL   = "5m"      # 以 5 分鐘作為訊號級別

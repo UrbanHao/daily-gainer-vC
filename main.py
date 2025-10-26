@@ -21,12 +21,24 @@ def state_iter():
     import sys, threading, termios, tty, select  # hotkeys
 
     load_dotenv(override=True)
-    equity = float(os.getenv("EQUITY_USDT", "10000"))
-    start_equity = equity
 
     day = DayGuard()
     adapter = LiveAdapter() if USE_LIVE else SimAdapter()
 
+    # --- 修正：從 API 獲取真實餘額，而不是 .env ---
+    if USE_LIVE:
+        try:
+            equity = adapter.balance_usdt()
+            print(f"--- 成功獲取初始餘額: {equity:.2f} USDT ---")
+        except Exception as e:
+            print(f"--- 致命錯誤：無法獲取初始餘額: {e} ---")
+            print("請檢查 API Key 權限或 .env 設定。程式即將退出。")
+            sys.exit(1) # 退出程式
+    else:
+        equity = float(os.getenv("EQUITY_USDT", "10000")) # 模擬模式
+        print(f"--- 模擬 (SIM) 模式啟動，初始權益: {equity:.2f} USDT ---")
+        
+    start_equity = equity
     last_scan = 0
     prev_syms = []
     last_bal_ts = 0.0
@@ -97,6 +109,21 @@ def state_iter():
                 # 冷卻避免馬上下單、並讓下一輪立即抓 balance
                 cooldown["until"] = time.time() + COOLDOWN_SEC
                 last_bal_ts = 0.0
+
+                # --- 修正：平倉後立即更新權益 (equity) ---
+                try:
+                    if USE_LIVE:
+                        equity = adapter.balance_usdt() # 更新用於下單的 equity
+                        account["balance"] = equity    # 更新用於顯示的 balance
+                        log(f"Balance updated: {equity:.2f}", "SYS")
+                    else:
+                        # 模擬模式：用 PnL 計算
+                        equity = start_equity * (1.0 + day.state.pnl_pct)
+                except Exception as e:
+                    log(f"Balance update failed: {e}", "SYS")
+                    equity = start_equity * (1.0 + day.state.pnl_pct) # 失敗時回退
+                # --- 修正結束 ---
+                
                 position_view = None
         else:
             # 2) 無持倉：若未停機，掃描與找入場
@@ -141,14 +168,11 @@ def state_iter():
                     cooldown["until"] = time.time() + COOLDOWN_SEC
                     cooldown["symbol_lock"][symbol] = time.time() + REENTRY_BLOCK_SEC
 
-        # 依照可用資訊更新 Equity：有 balance 用 balance，否則用起始本金 * (1 + 當日% 報酬)
-        try:
-            pnl = float(getattr(day.state, "pnl_pct", 0.0) or 0.0)
-        except Exception:
-            pnl = 0.0
-        account["equity"] = (account.get("balance")
-                              if account.get("balance") is not None
-                              else start_equity * (1.0 + pnl))
+        # 依照可用資訊更新 Equity (顯示用)
+        # (實際的 equity 變數已在啟動時和平倉後更新)
+        account["equity"] = equity
+        if USE_LIVE and account.get("balance") is None: # 處理第一次啟動時
+            account["balance"] = equity
 
         # 3) 輸出給面板
         yield {

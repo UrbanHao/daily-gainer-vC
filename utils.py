@@ -100,3 +100,21 @@ def _rest_json(path: str, params=None, timeout=5, tries=3):
         time.sleep(0.3 * (t + 1))
     # 把最後一個錯誤丟回去，外層會捕捉並 log，不讓主迴圈掛掉
     raise last_err if last_err else RuntimeError("REST all hosts failed")
+
+
+# --- Binance Futures server time offset (ms) ---
+def _fapi_server_time_ms():
+    try:
+        import requests
+        r = SESSION.get(f"{BINANCE_FUTURES_BASE}/fapi/v1/time", timeout=5)
+        r.raise_for_status()
+        return int(r.json().get("serverTime", now_ts_ms()))
+    except Exception:
+        return now_ts_ms()
+
+try:
+    _local = now_ts_ms()
+    _server = _fapi_server_time_ms()
+    TIME_OFFSET_MS = _server - _local
+except Exception:
+    TIME_OFFSET_MS = 0

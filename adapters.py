@@ -1,5 +1,9 @@
 import os, hmac, hashlib, requests, time
-from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE
+from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE, TIME_OFFSET_MS, safe_get_json, ws_best_price
+try:
+    TIME_OFFSET_MS
+except NameError:
+    TIME_OFFSET_MS = 0  # fallback if not imported
 from dotenv import dotenv_values
 import os
 try:
@@ -77,41 +81,53 @@ class LiveAdapter:
                     return 0.0
         return 0.0
     def _post(self, path, params):
-        params = dict(params)
-        params["timestamp"] = now_ts_ms() + int(TIME_OFFSET_MS)
-        params.setdefault("recvWindow", 60000)
-        qs = self._sign(params)
-        r = SESSION.post(f"{self.base}{path}?{qs}", headers={"X-MBX-APIKEY": self.key}, timeout=10)
-        r.raise_for_status()
-        return r
+            params = dict(params)
+            params["timestamp"] = now_ts_ms() + int(TIME_OFFSET_MS)
+            params.setdefault("recvWindow", 60000)
+            qs = self._sign(params)
+            r = SESSION.post(f"{self.base}{path}?{qs}", headers={"X-MBX-APIKEY": self.key}, timeout=10)
+            
+            # --- 新增除錯訊息 ---
+            if not r.ok:
+                print(f"[API ERROR] POST {path} returned {r.status_code}")
+                print(f"Server msg: {r.text}")
+            # ------------------
+
+            r.raise_for_status()
+            return r.json()
 
     def _get(self, path, params):
-        import hmac, hashlib
-        from urllib.parse import urlencode
+            params = dict(params or {})
+            params["timestamp"] = now_ts_ms() + int(TIME_OFFSET_MS)
+            params.setdefault("recvWindow", 60000)
 
-        params = dict(params or {})
-        params["timestamp"] = now_ts_ms() + int(TIME_OFFSET_MS)
-        params.setdefault("recvWindow", 60000)
-
-        if not getattr(self, "api_key", None) or not getattr(self, "api_secret", None):
-            raise RuntimeError("Missing Binance Futures API key/secret. Set BINANCE_API_KEY / (BINANCE_API_SECRET|BINANCE_SECRET)")
-
-        qs = urlencode(params, doseq=True)
-        sig = hmac.new(self.api_secret.encode("utf-8"), qs.encode("utf-8"), hashlib.sha256).hexdigest()
-        params["signature"] = sig
-
-        r = SESSION.get(f"{self.base}{path}", params=params, timeout=10)
-        r.raise_for_status()
-        return r
+            qs = self._sign(params)
+            r = SESSION.get(f"{self.base}{path}?{qs}", headers={"X-MBX-APIKEY": self.key}, timeout=10)
+            
+            # --- 新增除錯訊息 ---
+            if not r.ok:
+                print(f"[API ERROR] {path} returned {r.status_code}")
+                print(f"Server msg: {r.text}")
+            # ------------------
+            
+            r.raise_for_status()
+            return r.json()
 
     def _delete(self, path, params):
-        params = dict(params or {})
-        params["timestamp"] = now_ts_ms() + int(TIME_OFFSET_MS)
-        params.setdefault("recvWindow", 60000)
-        qs = self._sign(params)
-        r = SESSION.delete(f"{self.base}{path}?{qs}", headers={"X-MBX-APIKEY": self.key}, timeout=10)
-        r.raise_for_status()
-        return r
+            params = dict(params or {})
+            params["timestamp"] = now_ts_ms() + int(TIME_OFFSET_MS)
+            params.setdefault("recvWindow", 60000)
+            qs = self._sign(params)
+            r = SESSION.delete(f"{self.base}{path}?{qs}", headers={"X-MBX-APIKEY": self.key}, timeout=10)
+            
+            # --- 新增除錯訊息 ---
+            if not r.ok:
+                print(f"[API ERROR] DELETE {path} returned {r.status_code}")
+                print(f"Server msg: {r.text}")
+            # ------------------
+
+            r.raise_for_status()
+            return r.json()
 
     def has_open(self): return self.open is not None
 

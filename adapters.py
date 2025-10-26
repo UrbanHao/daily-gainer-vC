@@ -83,20 +83,26 @@ class LiveAdapter:
         qs = self._sign(params)
         r = SESSION.post(f"{self.base}{path}?{qs}", headers={"X-MBX-APIKEY": self.key}, timeout=10)
         r.raise_for_status()
-        return r.json()
+        return r
 
     def _get(self, path, params):
-        # 私有端點需要 key/secret；公開端點不檢查
-        if path.startswith("/fapi/") and ("balance" in path or "account" in path or "order" in path):
-            if not (getattr(self, "api_key", None) and getattr(self, "api_secret", None)):
-                raise RuntimeError("Missing Binance Futures API key/secret. Set BINANCE_API_KEY / BINANCE_API_SECRET in environment or .env")
+        import hmac, hashlib
+        from urllib.parse import urlencode
+
         params = dict(params or {})
         params["timestamp"] = now_ts_ms() + int(TIME_OFFSET_MS)
         params.setdefault("recvWindow", 60000)
-        qs = self._sign(params)
-        r = SESSION.get(f"{self.base}{path}?{qs}", headers={"X-MBX-APIKEY": self.key}, timeout=10)
+
+        if not getattr(self, "api_key", None) or not getattr(self, "api_secret", None):
+            raise RuntimeError("Missing Binance Futures API key/secret. Set BINANCE_API_KEY / (BINANCE_API_SECRET|BINANCE_SECRET)")
+
+        qs = urlencode(params, doseq=True)
+        sig = hmac.new(self.api_secret.encode("utf-8"), qs.encode("utf-8"), hashlib.sha256).hexdigest()
+        params["signature"] = sig
+
+        r = SESSION.get(f"{self.base}{path}", params=params, timeout=10)
         r.raise_for_status()
-        return r.json()
+        return r
 
     def _delete(self, path, params):
         params = dict(params or {})
@@ -105,7 +111,7 @@ class LiveAdapter:
         qs = self._sign(params)
         r = SESSION.delete(f"{self.base}{path}?{qs}", headers={"X-MBX-APIKEY": self.key}, timeout=10)
         r.raise_for_status()
-        return r.json()
+        return r
 
     def has_open(self): return self.open is not None
 

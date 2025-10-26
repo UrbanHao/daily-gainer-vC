@@ -96,7 +96,7 @@ def render_layout(top10, day_state, position, events, account=None):
     return layout
 
 def live_render(loop_iterable):
-    with Live(refresh_per_second=8, console=console) as live:
+    with Live(refresh_per_second=12, console=console) as live:
         for state in loop_iterable:
             live.update(render_layout(
                 state.get("top10", []),

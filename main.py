@@ -87,10 +87,10 @@ def state_iter():
         if adapter.has_open():
             try:
                 try:
-            closed, pct, sym = adapter.poll_and_close_if_hit(day)
-        except Exception as e:
-            log(f"poll error: {e}")
-            closed, pct, sym = False, None, None
+                closed, pct, sym = adapter.poll_and_close_if_hit(day)
+            except Exception as e:
+                log(f"poll error: {e}")
+                closed, pct, sym = False, None, None
             except Exception as e:
                 log(f"poll error: {e}")
                 closed, pct, sym = False, None, None
@@ -109,6 +109,9 @@ def state_iter():
                         top10 = fetch_top_gainers(10)
                         last_scan = t
                         log("top10 ok", "SCAN")
+                    if USE_WEBSOCKET:
+                        syms = [t[0] for t in top10]
+                        start_ws(syms, USE_TESTNET)
                     except Exception as e:
                         log(f"scan error: {e}", "SCAN")
 

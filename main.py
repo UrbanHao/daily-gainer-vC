@@ -160,8 +160,30 @@ def state_iter():
                     symbol, entry = candidate
                     side = "LONG"
                     notional = position_size_notional(equity)
-                    qty = max(round(notional / entry, 3), 0.001)
+
+                    # --- 修正精度錯誤 ---
+                    
+                    # 1. 修正 Qty 精度：
+                    #    硬寫 3 位小數 (0.001) 太危險。對多數山寨幣，1 位 (0.1) 是更安全的猜測。
+                    #    (這仍然是猜測，但比 3 好)
+                    qty = max(round(notional / entry, 1), 0.1)
+
                     sl, tp = compute_bracket(entry, side)
+
+                    # 2. 修正 SL/TP 價格精度：
+                    #    我們必須將 SL/TP 四捨五入到有效的小數位。
+                    #    最佳猜測是 "參照進場價 (entry) 的小數位數"。
+                    s_entry = f"{entry:.10g}" # 將 entry 轉為字串
+                    if '.' in s_entry:
+                        price_precision = len(s_entry.split('.')[-1])
+                    else:
+                        price_precision = 0 # 處理像 BTC 這樣的整數價格
+                    
+                    sl = round(sl, price_precision)
+                    tp = round(tp, price_precision)
+                    
+                    # --- 修正結束 ---
+
                     adapter.place_bracket(symbol, side, qty, entry, sl, tp)
                     position_view = {"symbol":symbol, "side":side, "qty":qty, "entry":entry, "sl":sl, "tp":tp}
                     log(f"OPEN {symbol} qty={qty} entry={entry:.6f}", "ORDER")

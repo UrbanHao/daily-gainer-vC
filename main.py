@@ -86,10 +86,10 @@ def state_iter():
         # 1) 平倉監控
         if adapter.has_open():
             try:
-            closed, pct, sym = adapter.poll_and_close_if_hit(day)
-        except Exception as e:
-            log(f"poll error: {e}")
-            closed, pct, sym = False, None, None
+                closed, pct, sym = adapter.poll_and_close_if_hit(day)
+            except Exception as e:
+                log(f"poll error: {e}")
+                closed, pct, sym = False, None, None
             if closed:
                 log(f"CLOSE {sym} pct={pct*100:.2f}% day={day.state.pnl_pct*100:.2f}%")
                 # 冷卻避免馬上下單、並讓下一輪立即抓 balance

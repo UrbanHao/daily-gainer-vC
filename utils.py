@@ -1,3 +1,6 @@
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import time
 import statistics
 import requests
 from datetime import datetime, timezone
@@ -15,9 +18,6 @@ def now_ts_ms():
 def ws_best_price(symbol: str):
     try:
         from ws_client import ws_best_price as _ws
-        from requests.adapters import HTTPAdapter
-        from urllib3.util.retry import Retry
-        import time
         return _ws(symbol)
     except Exception:
         return None

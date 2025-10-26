@@ -26,3 +26,12 @@ Thumbs.db
 .vscode/
 .idea/
 journal.csv
+# Python
+__pycache__/
+*.pyc
+
+# Local env & secrets
+.env
+
+# Runtime artifacts
+journal.csv

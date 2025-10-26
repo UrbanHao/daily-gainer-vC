@@ -83,17 +83,14 @@ def state_iter():
     while True:
         day.rollover()
 
-        # 1) 平倉監控
+                # 1) 平倉監控
         if adapter.has_open():
             try:
-                try:
                 closed, pct, sym = adapter.poll_and_close_if_hit(day)
             except Exception as e:
                 log(f"poll error: {e}")
                 closed, pct, sym = False, None, None
-            except Exception as e:
-                log(f"poll error: {e}")
-                closed, pct, sym = False, None, None
+
             if closed:
                 log(f"CLOSE {sym} pct={pct*100:.2f}% day={day.state.pnl_pct*100:.2f}%")
                 # 冷卻避免馬上下單、並讓下一輪立即抓 balance
@@ -102,6 +99,7 @@ def state_iter():
                 position_view = None
         else:
             # 2) 無持倉：若未停機，掃描與找入場
+            
             if not day.state.halted:
                 t = time.time()
                 if not paused["scan"] and (t - last_scan > SCAN_INTERVAL_S):
@@ -109,12 +107,13 @@ def state_iter():
                         top10 = fetch_top_gainers(10)
                         last_scan = t
                         log("top10 ok", "SCAN")
-                    if USE_WEBSOCKET:
-                        syms = [t[0] for t in top10]
-                        start_ws(syms, USE_TESTNET)
+                        if USE_WEBSOCKET:
+                            syms = [t[0] for t in top10]
+                            start_ws(syms, USE_TESTNET)
                     except Exception as e:
                         log(f"scan error: {e}", "SCAN")
 
+                # 由上而下找第一個符合量價突破
                 # 由上而下找第一個符合量價突破
                 # 若還在冷卻，暫不找進場
                 if time.time() < cooldown["until"]:

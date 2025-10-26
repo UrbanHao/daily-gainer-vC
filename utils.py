@@ -56,3 +56,24 @@ def ema(vals, n):
     for v in vals[1:]:
         e = v*k + e*(1-k)
     return e
+
+
+# 安裝全域重試（429/5xx，帶退避）
+_retry = Retry(total=3, backoff_factor=0.4, status_forcelist=[429,500,502,503,504], allowed_methods=["GET","POST","DELETE"])
+SESSION.mount("https://", HTTPAdapter(max_retries=_retry))
+SESSION.mount("http://",  HTTPAdapter(max_retries=_retry))
+
+
+def safe_get_json(url: str, params=None, timeout=4, tries=2):
+    """帶重試/timeout 的 GET，失敗拋例外讓上層 decide。"""
+    params = params or {}
+    last = None
+    for i in range(max(1, tries)):
+        try:
+            r = SESSION.get(url, params=params, timeout=timeout)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last = e
+            time.sleep(0.3 * (i + 1))
+    raise last

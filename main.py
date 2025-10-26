@@ -86,7 +86,11 @@ def state_iter():
         # 1) 平倉監控
         if adapter.has_open():
             try:
-                closed, pct, sym = adapter.poll_and_close_if_hit(day)
+                try:
+            closed, pct, sym = adapter.poll_and_close_if_hit(day)
+        except Exception as e:
+            log(f"poll error: {e}")
+            closed, pct, sym = False, None, None
             except Exception as e:
                 log(f"poll error: {e}")
                 closed, pct, sym = False, None, None
@@ -131,6 +135,8 @@ def state_iter():
                     adapter.place_bracket(symbol, side, qty, entry, sl, tp)
                     position_view = {"symbol":symbol, "side":side, "qty":qty, "entry":entry, "sl":sl, "tp":tp}
                     log(f"OPEN {symbol} qty={qty} entry={entry:.6f}", "ORDER")
+                    cooldown["until"] = time.time() + COOLDOWN_SEC
+                    cooldown["symbol_lock"][symbol] = time.time() + REENTRY_BLOCK_SEC
 
         # 3) 輸出給面板
         yield {

@@ -30,7 +30,10 @@ class SimAdapter:
     def poll_and_close_if_hit(self, day_guard):
         if not self.open: return False, None, None
         try:
+            try:
             p = self.best_price(self.open["symbol"])
+        except Exception as _e:
+            return False, None, None
         except Exception as _e:
             return False, None, None
         side = self.open["side"]

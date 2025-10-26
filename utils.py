@@ -22,10 +22,9 @@ def ws_best_price(symbol: str):
     except Exception:
         return None
 def fetch_top_gainers(limit=10):
-    r = SESSION.get(f"{BINANCE_FUTURES_BASE}/fapi/v1/ticker/24hr", timeout=10)
-    r.raise_for_status()
+    rows = _rest_json("/fapi/v1/ticker/24hr", timeout=6, tries=3)
     items = []
-    for x in r.json():
+    for x in rows:
         s = x.get("symbol", "")
         if (not s.endswith("USDT")) or any(k in s for k in EXCLUDE_KEYWORDS):
             continue
@@ -42,11 +41,7 @@ def fetch_top_gainers(limit=10):
     return items[:limit]
 
 def fetch_klines(symbol, interval, limit):
-    r = SESSION.get(f"{BINANCE_FUTURES_BASE}/fapi/v1/klines",
-                    params={"symbol":symbol, "interval":interval, "limit":limit},
-                    timeout=10)
-    r.raise_for_status()
-    rows = r.json()
+    rows = _rest_json("/fapi/v1/klines", params={"symbol":symbol, "interval":interval, "limit":limit}, timeout=6, tries=3)
     closes = [float(k[4]) for k in rows]
     highs  = [float(k[2]) for k in rows]
     vols   = [float(k[5]) for k in rows]
@@ -80,3 +75,28 @@ def safe_get_json(url: str, params=None, timeout=4, tries=2):
             last = e
             time.sleep(0.3 * (i + 1))
     raise last
+
+# --- Resilient REST hosts (main & testnet) ---
+FUTURES_HOSTS_MAIN  = ["https://fapi.binance.com", "https://fapi1.binance.com", "https://fapi2.binance.com"]
+FUTURES_HOSTS_TEST  = ["https://testnet.binancefuture.com"]
+
+def _rest_json(path: str, params=None, timeout=5, tries=3):
+    """對 Binance Futures REST 做多主機輪詢 + 退避重試。
+    不依賴全域 BASE，動態選 main/testnet，避免單一 host DNS 抽風。
+    """
+    from config import USE_TESTNET  # 延遲載入避免循環
+    hosts = FUTURES_HOSTS_TEST if USE_TESTNET else FUTURES_HOSTS_MAIN
+    params = params or {}
+    last_err = None
+    for t in range(max(1, tries)):
+        for base in hosts:
+            try:
+                r = SESSION.get(f"{base}{path}", params=params, timeout=timeout)
+                r.raise_for_status()
+                return r.json()
+            except Exception as e:
+                last_err = e
+        # 退避 + 一點 jitter
+        time.sleep(0.3 * (t + 1))
+    # 把最後一個錯誤丟回去，外層會捕捉並 log，不讓主迴圈掛掉
+    raise last_err if last_err else RuntimeError("REST all hosts failed")

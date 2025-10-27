@@ -13,8 +13,8 @@ TP_PCT           = 0.015     # 單筆停利 +1.5%
 SL_PCT           = 0.0075    # 單筆止損 -0.75%
 MAX_TRADES_DAY   = 10         # 每日最多交易筆數
 SCAN_INTERVAL_S  = 10        # Top10 刷新頻率（秒）
-USE_LIVE         = True     # 先跑模擬；接實盤請改 True
-
+USE_LIVE         = False     # 先跑模擬；接實盤請改 True
+SCAN_TOP_N       = 30 
 # ================= 訊號參數（版本 C） =================
 KLINE_INTERVAL   = "5m"      # 以 5 分鐘作為訊號級別
 KLINE_LIMIT      = 120       # 拉 120 根 5m（≈ 10 小時）

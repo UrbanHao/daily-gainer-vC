@@ -5,7 +5,7 @@ import time, os
 from dotenv import load_dotenv
 
 from config import (USE_WEBSOCKET, USE_TESTNET, USE_LIVE, SCAN_INTERVAL_S, DAILY_TARGET_PCT, DAILY_LOSS_CAP,
-                    PER_TRADE_RISK)
+                    PER_TRADE_RISK, SCAN_TOP_N)
 from utils import fetch_top_gainers, SESSION
 from risk_frame import DayGuard, position_size_notional, compute_bracket
 from adapters import SimAdapter, LiveAdapter
@@ -50,6 +50,7 @@ def state_iter():
     top10 = []
     events = []
     position_view = None
+    vbo_cache = {} # <-- 新增：VBO 訊號快取
     # ---- anti-churn / re-entry guard ----
     COOLDOWN_SEC = 3             # 平倉後全域冷卻，避免下一輪又馬上下單
     REENTRY_BLOCK_SEC = 45       # 同一幣種平倉後禁止再次進場秒數
@@ -146,12 +147,24 @@ def state_iter():
                 # t = time.time() # <-- 這行可以刪了
                 if not paused["scan"] and (t_now - last_scan > SCAN_INTERVAL_S):
                     try:
-                        top10 = fetch_top_gainers(10)
-                        last_scan = t_now # <--- 修正點
-                        log("top10 ok", "SCAN")
+                        top10 = fetch_top_gainers(SCAN_TOP_N) # <-- 修正 1: 使用變數
+                        last_scan = t_now
+                        
+                        # --- 核心優化：在這裡快取 VBO 訊號 ---
+                        new_cache = {}
+                        for s, pct, last, vol in top10:
+                            # 修正 2: 呼叫 API (這才會發起請求)
+                            new_cache[s] = volume_breakout_ok(s)
+                        vbo_cache = new_cache # 原子化更新快取
+                        # --- 優化結束 ---
+
+                        log(f"top{SCAN_TOP_N} ok", "SCAN")
+                        
                         if USE_WEBSOCKET:
                             syms = [t[0] for t in top10]
-                            start_ws(syms, USE_TESTNET)
+                            if syms != prev_syms:
+                                start_ws(syms, USE_TESTNET)
+                                prev_syms = syms
                     except Exception as e:
                         log(f"scan error: {e}", "SCAN")
 
@@ -167,7 +180,8 @@ def state_iter():
                     lock_until = cooldown['symbol_lock'].get(s, 0)
                     if time.time() < lock_until:
                         continue
-                    if volume_breakout_ok(s):
+                    # --- 修正 4：從快取讀取 VBO 訊號 ---
+                    if vbo_cache.get(s, False):
                         candidate = (s, last); break
 
                 if candidate:

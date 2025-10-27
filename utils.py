@@ -6,6 +6,7 @@ import requests
 from datetime import datetime, timezone
 import math
 from config import BINANCE_FUTURES_BASE, BINANCE_FUTURES_TEST_BASE, USE_TESTNET, SYMBOL_BLACKLIST
+from typing import List, Optional # <-- 新增
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "daily-gainer-bot/vC"})
@@ -33,7 +34,7 @@ def fetch_top_gainers(limit=10):
         s = x.get("symbol", "")
         if (not s.endswith("USDT")) or any(k in s for k in EXCLUDE_KEYWORDS):
             continue
-        # --- 新增：檢查黑名單 ---
+        # --- 檢查黑名單 ---
         if s in SYMBOL_BLACKLIST:
             continue
         # --- 結束 ---
@@ -65,6 +66,24 @@ def ema(vals, n):
     for v in vals[1:]:
         e = v*k + e*(1-k)
     return e
+
+# --- ATR 計算 ---
+def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> Optional[float]:
+    """計算 Average True Range (ATR)"""
+    if len(closes) < period + 1:
+        return None # 數據不足
+
+    true_ranges = []
+    for i in range(1, len(closes)):
+        high = highs[i]
+        low = lows[i]
+        prev_close = closes[i-1]
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        true_ranges.append(tr)
+
+    # 使用指數移動平均 (EMA / Wilder's smoothing) 計算 ATR
+    atr = ema(true_ranges, period) # 使用 ema 函數
+    return atr
 
 # 安裝全域重試（429/5xx，帶退避）
 _retry = Retry(total=3, backoff_factor=0.4, status_forcelist=[429,500,502,503,504], allowed_methods=["GET","POST","DELETE"])
@@ -118,7 +137,6 @@ def load_exchange_info():
     (main.py 會在 KeyError 時重新呼叫此函數)
     """
     global EXCHANGE_INFO
-    # if EXCHANGE_INFO: return # 移除這行，允許 main.py 強制刷新
     try:
         info = _rest_json("/fapi/v1/exchangeInfo")
         data = {}
@@ -133,7 +151,6 @@ def load_exchange_info():
     except Exception as e:
         print(f"--- FATAL: Failed to load/refresh Exchange Info: {e} ---")
         print("--- Bot may fail placing orders due to unknown precision ---")
-        # 這裡不 raise，讓 main.py 的 fallback 機制處理
 
 # --- 啟動時執行 ---
 update_time_offset()

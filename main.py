@@ -5,11 +5,11 @@ import time, os
 from dotenv import load_dotenv
 
 from config import (USE_WEBSOCKET, USE_TESTNET, USE_LIVE, SCAN_INTERVAL_S, DAILY_TARGET_PCT, DAILY_LOSS_CAP,
-                    PER_TRADE_RISK, SCAN_TOP_N, ALLOW_SHORT)
+                    PER_TRADE_RISK, SCAN_TOP_N, ALLOW_SHORT) # <-- 匯入 ALLOW_SHORT
 from utils import fetch_top_gainers, SESSION
-from risk_frame import DayGuard, position_size_notional, compute_bracket
+from risk_frame import DayGuard, position_size_notional, compute_bracket # compute_bracket 現在需要 atr
 from adapters import SimAdapter, LiveAdapter
-from signal_volume_breakout import volume_breakout_ok, volume_breakdown_ok # <-- 匯入新函數
+from signal_volume_breakout import get_vbo_long_signal, get_vbo_short_signal # <-- 修改匯入
 from panel import live_render
 from ws_client import start_ws, stop_ws
 import threading
@@ -40,17 +40,17 @@ def state_iter():
     else:
         equity = float(os.getenv("EQUITY_USDT", "10000"))
         print(f"--- SIM Mode started with initial equity: {equity:.2f} USDT ---")
-        
+
     start_equity = equity
     last_scan = 0
     last_time_sync = time.time()
     prev_syms = []
     account = {"equity": equity, "balance": None, "testnet": USE_TESTNET}
     paused = {"scan": False}
-    top10 = [] # 變數名維持 top10，但內容是 topN
+    top10 = []
     events = []
     position_view = None
-    vbo_cache = {} # VBO 快取
+    vbo_cache = {} # VBO 快取 (儲存 {"long": bool, "short": bool, "atr": float})
     COOLDOWN_SEC = 3
     REENTRY_BLOCK_SEC = 45
     cooldown = {"until": 0.0, "symbol_lock": {}}
@@ -58,7 +58,7 @@ def state_iter():
     def log(msg, tag="SYS"):
         ts = datetime.now().strftime("%H:%M:%S")
         events.append((ts, f"{tag}: {msg}"))
-    
+
     # --- 鍵盤監聽 ---
     def _keyloop():
         fd = sys.stdin.fileno()
@@ -75,7 +75,6 @@ def state_iter():
                     elif ch == "x":
                         if adapter.has_open():
                             try:
-                                # TODO: 實作 adapter.force_close_position()
                                 log("Force close requested (Not implemented yet)", "KEY")
                             except Exception as e:
                                 log(f"Close error: {e}", "KEY")
@@ -111,7 +110,7 @@ def state_iter():
                 log(f"Poll error: {e}", "POLL")
                 closed, pct, sym = False, None, None
 
-            # --- (新) 檢查反向大單 ---
+            # --- 檢查反向大單 ---
             if not closed and adapter.open:
                 try:
                     sym = adapter.open["symbol"]
@@ -125,12 +124,12 @@ def state_iter():
                         elif side == "SHORT" and lt.get("buy_signal") and near_anchor_ok(nowp_float, lt.get("buy_anchor")):
                             log(f"LT Early Exit Signal (Large Buy @ {lt.get('buy_anchor'):.4f})", sym)
                 except Exception:
-                    pass # 檢查失敗不影響
+                    pass
 
             if closed:
                 log(f"CLOSE {sym} PnL={pct*100:.2f}% | Day={day.state.pnl_pct*100:.2f}%", "TRADE")
                 cooldown["until"] = time.time() + COOLDOWN_SEC
-                cooldown["symbol_lock"][sym] = time.time() + REENTRY_BLOCK_SEC # 平倉後鎖定該幣種
+                cooldown["symbol_lock"][sym] = time.time() + REENTRY_BLOCK_SEC
 
                 # --- 更新權益 ---
                 try:
@@ -143,62 +142,72 @@ def state_iter():
                 except Exception as e:
                     log(f"Balance update failed: {e}", "SYS")
                     equity = start_equity * (1.0 + day.state.pnl_pct)
-                
+
                 position_view = None
 
         # --- 無持倉：掃描 & 進場 ---
         else:
             if not day.state.halted:
-                # --- 掃描 TopN & 快取 VBO ---
+                # --- 掃描 TopN & 快取 VBO (含 ATR) ---
                 if not paused["scan"] and (t_now - last_scan > SCAN_INTERVAL_S):
                     try:
                         top10 = fetch_top_gainers(SCAN_TOP_N)
                         last_scan = t_now
-                        
+
                         new_cache = {}
                         for s, pct, last, vol in top10:
+                            # 執行訊號檢查並獲取 ATR
+                            long_ok, atr_long = get_vbo_long_signal(s)
+                            short_ok, atr_short = get_vbo_short_signal(s) if ALLOW_SHORT else (False, None)
+                            # 儲存訊號狀態和 ATR 值 (優先用 Long 的 ATR，若無則用 Short 的)
                             new_cache[s] = {
-                                "long": volume_breakout_ok(s),
-                                "short": volume_breakdown_ok(s) if ALLOW_SHORT else False
+                                "long": long_ok,
+                                "short": short_ok,
+                                "atr": atr_long if atr_long is not None and atr_long > 0 else (atr_short if atr_short is not None and atr_short > 0 else None)
                             }
-                        vbo_cache = new_cache
+                        vbo_cache = new_cache # 原子化更新快取
 
-                        log(f"Scan top{SCAN_TOP_N} OK", "SCAN")
-                        
+                        log(f"Scan top{SCAN_TOP_N} OK, VBO cache updated", "SCAN") # Log 提示快取已更新
+
                         if USE_WEBSOCKET:
                             syms = [t[0] for t in top10]
-                            if syms != prev_syms:
+                            # --- 修正：比較 Set 而不是 List，忽略順序 ---
+                            if set(syms) != set(prev_syms): # <--- 改成比較 Set (寬鬆)
+                            # --- 修正結束 ---
                                 start_ws(syms, USE_TESTNET)
-                                prev_syms = syms
+                                prev_syms = syms # 仍然儲存 List 以供下次比較
                     except Exception as e:
-                        log(f"Scan error: {e}", "SCAN")
+                        log(f"Scan/Cache error: {e}", "SCAN") # 修改 Log 訊息
 
                 # --- 尋找進場候選 ---
-                if t_now < cooldown["until"]: # 全域冷卻中
+                if t_now < cooldown["until"]:
                     candidate = None
                 else:
                     candidate = None
                     nowp_cache = {}
 
                     for s, pct, last, vol in top10:
-                        if t_now < cooldown['symbol_lock'].get(s, 0): # 該幣種冷卻中
+                        if t_now < cooldown['symbol_lock'].get(s, 0):
                             continue
 
-                        vbo_signals = vbo_cache.get(s, {})
-                        ok_vbo_long = vbo_signals.get("long", False)
-                        ok_vbo_short = vbo_signals.get("short", False)
+                        # --- 讀取 VBO 快取 (含 ATR) ---
+                        vbo_data = vbo_cache.get(s, {})
+                        ok_vbo_long = vbo_data.get("long", False)
+                        ok_vbo_short = vbo_data.get("short", False)
+                        atr_value = vbo_data.get("atr") # 取得 ATR
 
+                        # --- 大單訊號 ---
                         lt = large_trades_signal_ws(s) or {}
                         ok_lt_long = False
                         ok_lt_short = False
-                        
+
                         if lt.get("buy_signal") or lt.get("sell_signal"):
                             try:
                                 nowp = ws_best_price(s)
                                 if nowp is None: nowp = last
                                 nowp_float = float(nowp)
                                 nowp_cache[s] = nowp_float
-                                
+
                                 if lt.get("buy_signal"):
                                     ok_lt_long = near_anchor_ok(nowp_float, lt.get("buy_anchor"))
                                 if ALLOW_SHORT and lt.get("sell_signal"):
@@ -206,25 +215,31 @@ def state_iter():
                             except Exception:
                                 nowp_cache[s] = last
 
-                        # --- 整合訊號 ---
+                        # --- 整合訊號 (加入 ATR 檢查) ---
                         if (ok_vbo_long or ok_lt_long):
+                            if atr_value is None or atr_value <= 0: # 檢查 ATR 是否有效
+                                # log(f"Skipping LONG {s} due to invalid ATR: {atr_value}", "SIGNAL") # Debug
+                                continue # ATR 無效，跳過
                             entry_price = float(nowp_cache.get(s, last) if ok_lt_long else last)
-                            candidate = (s, entry_price, "LONG")
-                            log(f"Signal: LONG (VBO:{ok_vbo_long}, LT:{ok_lt_long}) @{entry_price:.6g}", s)
+                            candidate = (s, entry_price, "LONG", atr_value) # <-- 回傳 4 個值
+                            log(f"Signal: LONG (VBO:{ok_vbo_long}, LT:{ok_lt_long}) ATR:{atr_value:.4g} @{entry_price:.6g}", s)
                             break
-                        
+
                         if ALLOW_SHORT and (ok_vbo_short or ok_lt_short):
+                            if atr_value is None or atr_value <= 0: # 檢查 ATR 是否有效
+                                # log(f"Skipping SHORT {s} due to invalid ATR: {atr_value}", "SIGNAL") # Debug
+                                continue # ATR 無效，跳過
                             entry_price = float(nowp_cache.get(s, last) if ok_lt_short else last)
-                            candidate = (s, entry_price, "SHORT")
-                            log(f"Signal: SHORT (VBO:{ok_vbo_short}, LT:{ok_lt_short}) @{entry_price:.6g}", s)
+                            candidate = (s, entry_price, "SHORT", atr_value) # <-- 回傳 4 個值
+                            log(f"Signal: SHORT (VBO:{ok_vbo_short}, LT:{ok_lt_short}) ATR:{atr_value:.4g} @{entry_price:.6g}", s)
                             break
 
                 # --- 執行下單 ---
                 if candidate:
-                    symbol, entry, side = candidate
-                    notional = position_size_notional(equity)
+                    symbol, entry, side, atr_for_trade = candidate # <-- 接收 4 個值
+                    # atr_for_trade = vbo_cache.get(symbol, {}).get("atr") # 不再需要重新獲取
 
-                    # --- 計算精度 ---
+                    # --- 計算精度 (含即時刷新邏輯) ---
                     try:
                         prec = EXCHANGE_INFO[symbol]
                         qty_prec = prec['quantityPrecision']
@@ -251,7 +266,17 @@ def state_iter():
                             price_prec = min(price_prec, 8)
                             log(f"Guessed price_prec={price_prec} for {symbol}", "SYS")
 
-                    # --- 計算數量 & SL/TP ---
+                    # --- 計算數量 (使用 ATR) & SL/TP ---
+                    # 確保 atr_for_trade 有效才計算倉位
+                    if atr_for_trade is None or atr_for_trade <= 0:
+                        log(f"ORDER FAILED for {symbol}: Invalid ATR value {atr_for_trade} before pos sizing", "ERROR")
+                        continue # ATR 無效，無法下單
+
+                    notional = position_size_notional(equity, entry, atr_for_trade) # <-- 傳入 atr
+                    if notional <= 0:
+                        log(f"Skipping {symbol}, calculated notional <= 0", "SYS")
+                        continue # 倉位為零，跳過
+
                     qty_raw = notional / entry
                     qty_factor = 10**qty_prec
                     qty = math.floor(qty_raw * qty_factor) / qty_factor
@@ -261,18 +286,21 @@ def state_iter():
                         cooldown["until"] = time.time() + 1
                         continue
 
-                    sl_raw, tp_raw = compute_bracket(entry, side)
+                    sl_raw, tp_raw = compute_bracket(entry, side, atr_for_trade) # <-- 傳入 atr
+                    if sl_raw is None or tp_raw is None: # 增加檢查
+                        log(f"ORDER FAILED for {symbol}: Cannot compute SL/TP (ATR={atr_for_trade})", "ERROR")
+                        continue
+
                     sl = round(sl_raw, price_prec)
                     tp = round(tp_raw, price_prec)
-                    entry_fmt = round(entry, price_prec) # 格式化 entry
+                    entry_fmt = round(entry, price_prec)
 
                     # --- 下單 (含錯誤捕捉) ---
                     try:
                         adapter.place_bracket(symbol, side, qty, entry_fmt, sl, tp)
                         position_view = {"symbol":symbol, "side":side, "qty":qty, "entry":entry_fmt, "sl":sl, "tp":tp}
-                        log(f"OPEN {side} {symbol} Qty={qty} @{entry_fmt:.{price_prec}f}", "ORDER")
+                        log(f"OPEN {side} {symbol} Qty={qty:.{qty_prec}f} @{entry_fmt:.{price_prec}f} SL={sl:.{price_prec}f} TP={tp:.{price_prec}f}", "ORDER")
                         cooldown["until"] = time.time() + COOLDOWN_SEC
-                        # cooldown["symbol_lock"][symbol] = time.time() + REENTRY_BLOCK_SEC #<--進場後不鎖
                     except Exception as e:
                         log(f"ORDER FAILED for {symbol}: {e}", "ERROR")
                         pass
@@ -285,7 +313,7 @@ def state_iter():
         yield {
             "top10": top10,
             "day_state": day.state,
-            "position": adapter.open if adapter.has_open() else position_view, # 優先用 adapter.open
+            "position": adapter.open if adapter.has_open() else position_view,
             "events": events,
             "account": account,
         }

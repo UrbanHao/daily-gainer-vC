@@ -6,7 +6,7 @@ from utils import fetch_klines, ema
 
 def volume_breakout_ok(symbol: str) -> bool:
     try:
-        closes, highs, vols = fetch_klines(symbol, KLINE_INTERVAL, KLINE_LIMIT)
+        closes, highs, lows, vols = fetch_klines(symbol, KLINE_INTERVAL, KLINE_LIMIT) # 接收 lows
         if len(closes) < max(HH_N, VOL_BASE_WIN) + VOL_LOOKBACK_CONFIRM + 2:
             return False
 
@@ -25,11 +25,43 @@ def volume_breakout_ok(symbol: str) -> bool:
         if recent_sum < need_sum:
             return False
 
-        # 結構過濾：EMA20 > EMA50
-        segment = closes[-(EMA_SLOW+10):]  # 足夠長度避免邊界
+        segment = closes[-(EMA_SLOW+10):]
         e_fast = ema(segment, EMA_FAST)
         e_slow = ema(segment, EMA_SLOW)
-        if e_fast is None or e_slow is None or e_fast <= e_slow:
+        if e_fast is None or e_slow is None or e_fast <= e_slow: # 多頭排列
+            return False
+
+        return True
+    except Exception:
+        return False
+
+def volume_breakdown_ok(symbol: str) -> bool:
+    """ (新) 檢查空頭訊號：跌破N根低點 + 放量 + EMA 空頭排列 """
+    try:
+        closes, highs, lows, vols = fetch_klines(symbol, KLINE_INTERVAL, KLINE_LIMIT)
+        if len(closes) < max(HH_N, VOL_BASE_WIN) + VOL_LOOKBACK_CONFIRM + 2:
+            return False
+
+        curr_close = closes[-1]
+        prev_low  = min(lows[-(HH_N+1):-1])  # 排除目前這根
+        if curr_close >= prev_low:
+            return False # 未跌破
+
+        breakdown_ratio = (prev_low - curr_close) / prev_low
+        if breakdown_ratio > OVEREXTEND_CAP: # 跌破幅度 > 2% (已過頭)
+            return False
+
+        base_window = vols[-(VOL_BASE_WIN+VOL_LOOKBACK_CONFIRM):-VOL_LOOKBACK_CONFIRM]
+        base_med = statistics.median(base_window)
+        recent_sum = sum(vols[-VOL_LOOKBACK_CONFIRM:])
+        need_sum = VOL_SPIKE_K * base_med * VOL_LOOKBACK_CONFIRM
+        if recent_sum < need_sum: # 量能不足
+            return False
+
+        segment = closes[-(EMA_SLOW+10):]
+        e_fast = ema(segment, EMA_FAST)
+        e_slow = ema(segment, EMA_SLOW)
+        if e_fast is None or e_slow is None or e_fast >= e_slow: # 必須是空頭排列
             return False
 
         return True

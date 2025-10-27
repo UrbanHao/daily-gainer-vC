@@ -1,0 +1,8 @@
+@@ -10,6 +10,7 @@
+ MAX_TRADES_DAY   = 10         # 每日最多交易筆數
+ SCAN_INTERVAL_S  = 10        # Top10 刷新頻率（秒）
+ SCAN_TOP_N       = 30        # <-- 新增：設定要掃描的 Top N 幣種數量 (例如 30 隻)
++ALLOW_SHORT      = True      # <-- 新增：是否允許做空
+ USE_LIVE         = True     # 先跑模擬；接實盤請改 True
+ 
+ # --- Large Trades (time-base, from WS aggTrade) ---

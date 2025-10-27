@@ -18,7 +18,7 @@ MAX_TRADES_DAY   = int(os.getenv("MAX_TRADES_DAY", "10"))           # 每日最�
 SCAN_INTERVAL_S  = int(os.getenv("SCAN_INTERVAL_S", "10"))          # 掃描刷新頻率（秒）
 SCAN_TOP_N       = int(os.getenv("SCAN_TOP_N", "30"))               # 掃描 Top N 幣種
 ALLOW_SHORT      = os.getenv("ALLOW_SHORT", "True").lower() == "true" # <-- 新增：是否允許做空
-USE_LIVE         = os.getenv("USE_LIVE", "True").lower() == "true"    # 實盤開關
+USE_LIVE         = os.getenv("USE_LIVE", "False").lower() == "true"    # 實盤開關
 
 # --- Large Trades (time-base, from WS aggTrade) ---
 LARGE_TRADES_ENABLED = os.getenv("LARGE_TRADES_ENABLED", "True").lower() == "true"

@@ -1,5 +1,5 @@
 import os, hmac, hashlib, requests, time
-from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE, TIME_OFFSET_MS, safe_get_json, ws_best_price, EXCHANGE_INFO
+from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE, TIME_OFFSET_MS, ws_best_price, EXCHANGE_INFO
 try:
     TIME_OFFSET_MS
 except NameError:

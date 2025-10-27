@@ -44,7 +44,7 @@ def state_iter():
     start_equity = equity
     last_scan = 0
     last_time_sync = time.time()
-    prev_syms = []
+    prev_syms = [] # <--- 用來儲存上次的幣種列表 (List)
     account = {"equity": equity, "balance": None, "testnet": USE_TESTNET}
     paused = {"scan": False}
     top10 = []
@@ -156,28 +156,43 @@ def state_iter():
 
                         new_cache = {}
                         for s, pct, last, vol in top10:
-                            # 執行訊號檢查並獲取 ATR
                             long_ok, atr_long = get_vbo_long_signal(s)
                             short_ok, atr_short = get_vbo_short_signal(s) if ALLOW_SHORT else (False, None)
-                            # 儲存訊號狀態和 ATR 值 (優先用 Long 的 ATR，若無則用 Short 的)
                             new_cache[s] = {
                                 "long": long_ok,
                                 "short": short_ok,
                                 "atr": atr_long if atr_long is not None and atr_long > 0 else (atr_short if atr_short is not None and atr_short > 0 else None)
                             }
-                        vbo_cache = new_cache # 原子化更新快取
+                        vbo_cache = new_cache
 
-                        log(f"Scan top{SCAN_TOP_N} OK, VBO cache updated", "SCAN") # Log 提示快取已更新
+                        log(f"Scan top{SCAN_TOP_N} OK, VBO cache updated", "SCAN")
 
                         if USE_WEBSOCKET:
                             syms = [t[0] for t in top10]
-                            # --- 修正：比較 Set 而不是 List，忽略順序 ---
-                            if set(syms) != set(prev_syms): # <--- 改成比較 Set (寬鬆)
-                            # --- 修正結束 ---
-                                start_ws(syms, USE_TESTNET)
-                                prev_syms = syms # 仍然儲存 List 以供下次比較
+                            current_set = set(syms)
+                            previous_set = set(prev_syms)
+
+                            # --- 修改：只有當差異超過 N 個幣時才重啟 ---
+                            symbols_changed_count = len(current_set.symmetric_difference(previous_set))
+                            RELOAD_THRESHOLD = 5 # 例如：差異超過 5 個幣才重啟
+
+                            if current_set != previous_set: # 只有在集合真的改變時才檢查
+                                if symbols_changed_count > RELOAD_THRESHOLD or not prev_syms: # 首次啟動也觸發
+                                    print(f"DEBUG: Symbol set changed significantly ({symbols_changed_count} changes > {RELOAD_THRESHOLD}). Reloading WebSocket.")
+                                    # --- Debugging ---
+                                    diff_added = current_set - previous_set
+                                    diff_removed = previous_set - current_set
+                                    if diff_added: print(f"DEBUG: Added symbols: {diff_added}")
+                                    if diff_removed: print(f"DEBUG: Removed symbols: {diff_removed}")
+                                    # --- End Debugging ---
+                                    start_ws(syms, USE_TESTNET)
+                                    prev_syms = syms # 更新 prev_syms 列表
+                                # else: # Debugging (Optional):
+                                #     print(f"DEBUG: Symbol set changed ({symbols_changed_count} changes <= {RELOAD_THRESHOLD}). WS not reloaded.")
+
                     except Exception as e:
-                        log(f"Scan/Cache error: {e}", "SCAN") # 修改 Log 訊息
+                        log(f"Scan/Cache error: {e}", "SCAN")
+
 
                 # --- 尋找進場候選 ---
                 if t_now < cooldown["until"]:
@@ -190,13 +205,11 @@ def state_iter():
                         if t_now < cooldown['symbol_lock'].get(s, 0):
                             continue
 
-                        # --- 讀取 VBO 快取 (含 ATR) ---
                         vbo_data = vbo_cache.get(s, {})
                         ok_vbo_long = vbo_data.get("long", False)
                         ok_vbo_short = vbo_data.get("short", False)
-                        atr_value = vbo_data.get("atr") # 取得 ATR
+                        atr_value = vbo_data.get("atr")
 
-                        # --- 大單訊號 ---
                         lt = large_trades_signal_ws(s) or {}
                         ok_lt_long = False
                         ok_lt_short = False
@@ -217,29 +230,26 @@ def state_iter():
 
                         # --- 整合訊號 (加入 ATR 檢查) ---
                         if (ok_vbo_long or ok_lt_long):
-                            if atr_value is None or atr_value <= 0: # 檢查 ATR 是否有效
-                                # log(f"Skipping LONG {s} due to invalid ATR: {atr_value}", "SIGNAL") # Debug
-                                continue # ATR 無效，跳過
+                            if atr_value is None or atr_value <= 0:
+                                continue
                             entry_price = float(nowp_cache.get(s, last) if ok_lt_long else last)
-                            candidate = (s, entry_price, "LONG", atr_value) # <-- 回傳 4 個值
+                            candidate = (s, entry_price, "LONG", atr_value)
                             log(f"Signal: LONG (VBO:{ok_vbo_long}, LT:{ok_lt_long}) ATR:{atr_value:.4g} @{entry_price:.6g}", s)
                             break
 
                         if ALLOW_SHORT and (ok_vbo_short or ok_lt_short):
-                            if atr_value is None or atr_value <= 0: # 檢查 ATR 是否有效
-                                # log(f"Skipping SHORT {s} due to invalid ATR: {atr_value}", "SIGNAL") # Debug
-                                continue # ATR 無效，跳過
+                            if atr_value is None or atr_value <= 0:
+                                continue
                             entry_price = float(nowp_cache.get(s, last) if ok_lt_short else last)
-                            candidate = (s, entry_price, "SHORT", atr_value) # <-- 回傳 4 個值
+                            candidate = (s, entry_price, "SHORT", atr_value)
                             log(f"Signal: SHORT (VBO:{ok_vbo_short}, LT:{ok_lt_short}) ATR:{atr_value:.4g} @{entry_price:.6g}", s)
                             break
 
                 # --- 執行下單 ---
                 if candidate:
-                    symbol, entry, side, atr_for_trade = candidate # <-- 接收 4 個值
-                    # atr_for_trade = vbo_cache.get(symbol, {}).get("atr") # 不再需要重新獲取
+                    symbol, entry, side, atr_for_trade = candidate
 
-                    # --- 計算精度 (含即時刷新邏輯) ---
+                    # --- 計算精度 ---
                     try:
                         prec = EXCHANGE_INFO[symbol]
                         qty_prec = prec['quantityPrecision']
@@ -266,16 +276,15 @@ def state_iter():
                             price_prec = min(price_prec, 8)
                             log(f"Guessed price_prec={price_prec} for {symbol}", "SYS")
 
-                    # --- 計算數量 (使用 ATR) & SL/TP ---
-                    # 確保 atr_for_trade 有效才計算倉位
+                    # --- 計算數量 & SL/TP ---
                     if atr_for_trade is None or atr_for_trade <= 0:
                         log(f"ORDER FAILED for {symbol}: Invalid ATR value {atr_for_trade} before pos sizing", "ERROR")
-                        continue # ATR 無效，無法下單
+                        continue
 
-                    notional = position_size_notional(equity, entry, atr_for_trade) # <-- 傳入 atr
+                    notional = position_size_notional(equity, entry, atr_for_trade)
                     if notional <= 0:
                         log(f"Skipping {symbol}, calculated notional <= 0", "SYS")
-                        continue # 倉位為零，跳過
+                        continue
 
                     qty_raw = notional / entry
                     qty_factor = 10**qty_prec
@@ -286,8 +295,8 @@ def state_iter():
                         cooldown["until"] = time.time() + 1
                         continue
 
-                    sl_raw, tp_raw = compute_bracket(entry, side, atr_for_trade) # <-- 傳入 atr
-                    if sl_raw is None or tp_raw is None: # 增加檢查
+                    sl_raw, tp_raw = compute_bracket(entry, side, atr_for_trade)
+                    if sl_raw is None or tp_raw is None:
                         log(f"ORDER FAILED for {symbol}: Cannot compute SL/TP (ATR={atr_for_trade})", "ERROR")
                         continue
 

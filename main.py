@@ -189,16 +189,50 @@ def state_iter():
                     side = "LONG"
                     notional = position_size_notional(equity)
 
-                    # --- 修正：使用 ExchangeInfo 進行精確計算 ---
+                    # --- 修正：使用 ExchangeInfo 進行精確計算 (含即時刷新) ---
                     try:
-                        # 1. 從緩存獲取該幣種的精度
+                        # 1. 嘗試從 (可能過期的) 緩存獲取精度
                         prec = EXCHANGE_INFO[symbol]
                         qty_prec = prec['quantityPrecision']
                         price_prec = prec['pricePrecision']
                     except KeyError:
-                        # 如果 exchangeInfo 找不到 (極少發生)，使用保守猜測
-                        log(f"No exchange info for {symbol}, using defaults", "ERR")
-                        qty_prec, price_prec = 0, 4 # 猜測：數量取整，價格 4 位
+                        # 2. 緩存中沒有 (可能是新幣 AINUSDT)，觸發「即時刷新」
+                        log(f"No exchange info for {symbol}. Attempting live refresh...", "SYS")
+                        try:
+                            # 呼叫 utils 函數，刷新全域 EXCHANGE_INFO
+                            load_exchange_info()
+                            
+                            # 3. 再次嘗試從 (剛刷新的) 緩存中獲取
+                            prec = EXCHANGE_INFO[symbol]
+                            qty_prec = prec['quantityPrecision']
+                            price_prec = prec['pricePrecision']
+                            log(f"Successfully refreshed info for {symbol}", "SYS")
+
+                        except KeyError:
+                            # 4. 刷新後 "仍然" 沒有 (代表這是下市幣 TAGUSDT 或現貨幣)
+                            #    啟動「猜測模式」作為最後手段
+                            log(f"Refresh failed. {symbol} not in official list. Using fallback guess.", "ERR")
+                            qty_prec = 0 # 數量取整數 (這個 OK)
+
+                            # --- 修正：動態猜測價格精度 (更精確) ---
+                            s_entry = f"{entry:.15f}" # 用 f 格式保留所有小數
+                            if '.' in s_entry:
+                                decimals = s_entry.split('.')[-1]
+                                non_zero_idx = -1
+                                for i, char in enumerate(decimals):
+                                    if char != '0':
+                                        non_zero_idx = i
+                                        break
+                                if non_zero_idx != -1:
+                                    price_prec = non_zero_idx + 3 # 在第一個非零數字後再保留 3 位
+                                else:
+                                    price_prec = 4 # 預設
+                            else:
+                                price_prec = 0
+                            
+                            price_prec = min(price_prec, 8) # 最多 8 位
+                            log(f"Guessed price_prec={price_prec} for {symbol}", "SYS")
+                            # --- 修正結束 ---
                     
                     # 2. 計算並格式化 Qty (數量)
                     # 數量必須用 math.floor 進行「無條件捨去」到指定精度

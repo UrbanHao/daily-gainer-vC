@@ -1,7 +1,7 @@
 # file: signal_large_trades_ws.py
 from collections import deque, defaultdict
 from typing import Optional, Dict, Deque
-import math, time
+import math, time, statistics
 
 from config import (
     LARGE_TRADES_ENABLED, LARGE_TRADES_MERGE_S, LARGE_TRADES_FILTER_MODE,
@@ -21,7 +21,28 @@ def _percentile(vals, p):
     s = sorted(vals)
     k = max(0, min(len(s)-1, int(round((p/100.0)*(len(s)-1)))))
     return s[k]
-
+# --- 新增：計算數值在列表中的百分位排名 ---
+def _calculate_percentile_rank(data: list, value: float) -> Optional[float]:
+    """Calculates the percentile rank of a value within a list."""
+    if not data:
+        return None
+    data.sort() # Ensure data is sorted
+    count_below = 0
+    count_equal = 0
+    for item in data:
+        if item < value:
+            count_below += 1
+        elif item == value:
+            count_equal += 1
+        else:
+            break # Since data is sorted
+    if count_equal == 0: # Value not in data, interpolate? For simplicity, use count_below.
+         rank = (count_below / len(data)) * 100.0
+    else:
+        # Standard definition: (count below + 0.5 * count equal) / total count
+         rank = ((count_below + 0.5 * count_equal) / len(data)) * 100.0
+    return rank
+# --- 結束 ---
 def large_trades_signal_ws(symbol: str) -> Optional[dict]:
     if not LARGE_TRADES_ENABLED:
         return None
@@ -72,12 +93,26 @@ def large_trades_signal_ws(symbol: str) -> Optional[dict]:
     else: # Absolute Mode
         buy_gate, sell_gate = LARGE_TRADES_BUY_ABS, LARGE_TRADES_SELL_ABS
 
+    # --- 新增：計算當前成交量的百分位排名 ---
+    buy_pct_rank = None
+    sell_pct_rank = None
+    if LARGE_TRADES_FILTER_MODE == "Percentile":
+        hist_buy_list = list(_hist_buy[symbol])
+        hist_sell_list = list(_hist_sell[symbol])
+        if buy_qty > 0 and hist_buy_list:
+             buy_pct_rank = _calculate_percentile_rank(hist_buy_list, buy_qty)
+        if sell_qty > 0 and hist_sell_list:
+             sell_pct_rank = _calculate_percentile_rank(hist_sell_list, sell_qty)
+    # --- 結束 ---
+
     return {
-        "buy_signal":  buy_qty  > buy_gate  and buy_anchor  is not None,
-        "sell_signal": sell_qty > sell_gate and sell_anchor is not None,
+        "buy_signal":  buy_qty  > buy_gate  and buy_anchor  is not None, # 進場判斷 (維持用 gate)
+        "sell_signal": sell_qty > sell_gate and sell_anchor is not None, # 進場判斷 (維持用 gate)
         "buy_vol": buy_qty, "sell_vol": sell_qty,
         "buy_anchor": buy_anchor, "sell_anchor": sell_anchor,
         "buy_gate": buy_gate, "sell_gate": sell_gate,
+        "buy_pct_rank": buy_pct_rank,   # <-- 新增回傳值
+        "sell_pct_rank": sell_pct_rank, # <-- 新增回傳值
     }
 
 def near_anchor_ok(price: float, anchor: Optional[float]) -> bool:

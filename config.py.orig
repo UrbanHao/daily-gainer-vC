@@ -12,8 +12,8 @@ SYMBOL_BLACKLIST = [
 DAILY_TARGET_PCT = float(os.getenv("DAILY_TARGET_PCT", "0.15"))     # 當日達標 +15%
 DAILY_LOSS_CAP   = float(os.getenv("DAILY_LOSS_CAP", "-0.05"))      # 當日最大虧損 -5%
 PER_TRADE_RISK   = float(os.getenv("PER_TRADE_RISK", "0.0075"))     # 每筆風險 0.75% 權益
-TP_PCT           = float(os.getenv("TP_PCT", "0.015"))              # 單筆停利 +1.5%
-SL_PCT           = float(os.getenv("SL_PCT", "0.0075"))             # 單筆止損 -0.75%
+# TP_PCT           = float(os.getenv("TP_PCT", "0.015"))              # (舊) 單筆停利 +1.5%
+# SL_PCT           = float(os.getenv("SL_PCT", "0.0075"))             # (舊) 單筆止損 -0.75%
 MAX_TRADES_DAY   = int(os.getenv("MAX_TRADES_DAY", "10"))           # 每日最多交易筆數
 SCAN_INTERVAL_S  = int(os.getenv("SCAN_INTERVAL_S", "10"))          # 掃描刷新頻率（秒）
 SCAN_TOP_N       = int(os.getenv("SCAN_TOP_N", "30"))               # 掃描 Top N 幣種
@@ -26,9 +26,15 @@ LARGE_TRADES_MERGE_S = int(os.getenv("LARGE_TRADES_MERGE_S", "5"))
 LARGE_TRADES_FILTER_MODE = os.getenv("LARGE_TRADES_FILTER_MODE", "Percentile")   # "Percentile" | "Absolute"
 LARGE_TRADES_BUY_PCT  = float(os.getenv("LARGE_TRADES_BUY_PCT",  "90"))
 LARGE_TRADES_SELL_PCT = float(os.getenv("LARGE_TRADES_SELL_PCT", "90"))
+LARGE_TRADES_EARLY_EXIT_PCT = float(os.getenv("LARGE_TRADES_EARLY_EXIT_PCT", "95.0")) # 例如：要求達到 95% 才考慮出場
 LARGE_TRADES_BUY_ABS  = float(os.getenv("LARGE_TRADES_BUY_ABS",  "1000000"))
 LARGE_TRADES_SELL_ABS = float(os.getenv("LARGE_TRADES_SELL_ABS", "1000000"))
 LARGE_TRADES_ANCHOR_DRIFT = float(os.getenv("LARGE_TRADES_ANCHOR_DRIFT", "0.001"))  # 0.1%
+
+# --- ATR 動態止損/止盈 ---
+ATR_PERIOD = int(os.getenv("ATR_PERIOD", "14"))                     # ATR 計算週期
+SL_ATR_MULTIPLIER = float(os.getenv("SL_ATR_MULTIPLIER", "1.5"))    # 止損 = 1.5 * ATR
+TP_ATR_MULTIPLIER = float(os.getenv("TP_ATR_MULTIPLIER", "3.0"))    # 止盈 = 3.0 * ATR (維持約 1:2 風報比)
 
 # ================= 訊號參數（版本 C） =================
 KLINE_INTERVAL   = os.getenv("KLINE_INTERVAL", "5m")      # 以 5 分鐘作為訊號級別

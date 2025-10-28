@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 import os
 load_dotenv(override=True)
+from decimal import Decimal # <-- 新增 Decimal 匯入
 
 # ================= 基本參數 =================
 SYMBOL_BLACKLIST = [
@@ -16,7 +17,7 @@ PER_TRADE_RISK   = float(os.getenv("PER_TRADE_RISK", "0.0075"))     # 每筆風�
 # SL_PCT           = float(os.getenv("SL_PCT", "0.0075"))             # (舊) 單筆止損 -0.75%
 MAX_TRADES_DAY   = int(os.getenv("MAX_TRADES_DAY", "10"))           # 每日最多交易筆數
 SCAN_INTERVAL_S  = int(os.getenv("SCAN_INTERVAL_S", "10"))          # 掃描刷新頻率（秒）
-SCAN_TOP_N       = int(os.getenv("SCAN_TOP_N", "30"))               # 掃描 Top N 幣種
+SCAN_TOP_N       = int(os.getenv("SCAN_TOP_N", "10"))               # 掃描 Top N 幣種
 ALLOW_SHORT      = os.getenv("ALLOW_SHORT", "True").lower() == "true" # <-- 新增：是否允許做空
 USE_LIVE         = os.getenv("USE_LIVE", "False").lower() == "true"    # 實盤開關
 
@@ -26,6 +27,7 @@ LARGE_TRADES_MERGE_S = int(os.getenv("LARGE_TRADES_MERGE_S", "5"))
 LARGE_TRADES_FILTER_MODE = os.getenv("LARGE_TRADES_FILTER_MODE", "Percentile")   # "Percentile" | "Absolute"
 LARGE_TRADES_BUY_PCT  = float(os.getenv("LARGE_TRADES_BUY_PCT",  "90"))
 LARGE_TRADES_SELL_PCT = float(os.getenv("LARGE_TRADES_SELL_PCT", "90"))
+LARGE_TRADES_EARLY_EXIT_PCT = float(os.getenv("LARGE_TRADES_EARLY_EXIT_PCT", "95.0")) # 例如：要求達到 95% 才考慮出場
 LARGE_TRADES_BUY_ABS  = float(os.getenv("LARGE_TRADES_BUY_ABS",  "1000000"))
 LARGE_TRADES_SELL_ABS = float(os.getenv("LARGE_TRADES_SELL_ABS", "1000000"))
 LARGE_TRADES_ANCHOR_DRIFT = float(os.getenv("LARGE_TRADES_ANCHOR_DRIFT", "0.001"))  # 0.1%
@@ -34,6 +36,10 @@ LARGE_TRADES_ANCHOR_DRIFT = float(os.getenv("LARGE_TRADES_ANCHOR_DRIFT", "0.001"
 ATR_PERIOD = int(os.getenv("ATR_PERIOD", "14"))                     # ATR 計算週期
 SL_ATR_MULTIPLIER = float(os.getenv("SL_ATR_MULTIPLIER", "1.5"))    # 止損 = 1.5 * ATR
 TP_ATR_MULTIPLIER = float(os.getenv("TP_ATR_MULTIPLIER", "3.0"))    # 止盈 = 3.0 * ATR (維持約 1:2 風報比)
+
+# --- 下單行為 ---
+USE_MARKET_ENTRY = os.getenv("USE_MARKET_ENTRY", "False").lower() == "true" # (可選) 是否使用市價進場
+MIN_NOTIONAL_FALLBACK = Decimal(os.getenv("MIN_NOTIONAL_FALLBACK", "5.0")) # exchangeInfo 缺少 minNotional 時的後備值 (USDT)
 
 # ================= 訊號參數（版本 C） =================
 KLINE_INTERVAL   = os.getenv("KLINE_INTERVAL", "5m")      # 以 5 分鐘作為訊號級別

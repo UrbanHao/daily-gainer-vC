@@ -1,4 +1,5 @@
 import os, hmac, hashlib, requests, time
+from typing import Tuple, Optional
 from utils import now_ts_ms, SESSION, BINANCE_FUTURES_BASE, TIME_OFFSET_MS, ws_best_price, EXCHANGE_INFO
 try:
     TIME_OFFSET_MS
@@ -51,7 +52,39 @@ class SimAdapter:
             day_guard.on_trade_close(pct)
             return True, pct, symbol
         return False, None, None
+# --- (新) 加入 SimAdapter 正確的 force_close_position ---
+    def force_close_position(self, symbol: str, reason="early_exit") -> Tuple[bool, Optional[float], Optional[float]]:
+        """
+        (模擬版本) 模擬立即市價平倉。
+        回傳: (永遠為 True, 近似 PnL 百分比, 近似出場價)
+        """
+        if not self.open or self.open.get("symbol") != symbol:
+            print(f"Sim Warning: force_close_position called for {symbol} but no matching position found.")
+            return False, None, None
 
+        side = self.open["side"]
+        entry = float(self.open["entry"])
+        qty = self.open.get("qty", 0)
+
+        approx_exit_price = entry # 模擬簡單平倉在入場價 (PnL=0)
+        try:
+            approx_exit_price = self.best_price(symbol) # 嘗試獲取市價
+        except Exception:
+            pass # 獲取失敗就用 entry
+
+        approx_pnl_pct = 0.0
+        if entry > 0:
+            pct = (approx_exit_price - entry) / entry
+            if side == "SHORT": pct = -pct
+            approx_pnl_pct = pct
+
+        print(f"SIMULATED: Force closing {side} {symbol} Qty={qty} @ approx {approx_exit_price:.6f} (Reason: {reason})")
+
+        self.open = None # 清除狀態
+
+        # main.py 會處理 day_guard 和 journal
+        return True, approx_pnl_pct, approx_exit_price
+    # --- SimAdapter 的 force_close_position 結束 ---
 class LiveAdapter:
     """
     Binance USDT-M Futures — 限價進場 + 兩條互斥條件單（TP/SL，closePosition=true）
@@ -244,3 +277,71 @@ class LiveAdapter:
         self.open = None
         day_guard.on_trade_close(pct)
         return True, pct, symbol
+    def force_close_position(self, symbol: str, reason="early_exit") -> Tuple[bool, Optional[float], Optional[float]]:
+        """
+        (新) 立即以市價單平倉指定幣種，並嘗試記錄 PnL。
+        回傳: (是否成功發送平倉單, 近似 PnL 百分比, 近似出場價)
+        """
+        if not self.open or self.open.get("symbol") != symbol:
+            print(f"Warning: force_close_position called for {symbol} but no matching position found.")
+            return False, None, None
+
+        side = self.open["side"]
+        qty = self.open["qty"]
+        entry = float(self.open["entry"])
+        tpId = self.open.get("tpId")
+        slId = self.open.get("slId")
+        close_side = "SELL" if side == "LONG" else "BUY"
+
+        # 1. 立即獲取當前價格作為近似出場價
+        approx_exit_price = None
+        try:
+            approx_exit_price = self.best_price(symbol)
+        except Exception as e:
+            print(f"Warning: Could not get best price for {symbol} before force close: {e}")
+
+        # 2. (重要) 先嘗試撤銷 OCO 訂單
+        cancelled_oco = False
+        try:
+            self._delete("/fapi/v1/allOpenOrders", {"symbol": symbol})
+            print(f"Successfully cancelled open orders for {symbol} before market close.")
+            cancelled_oco = True
+        except Exception as e:
+            print(f"ERROR: Failed to cancel OCO orders for {symbol}: {e}. Proceeding with market close attempt.")
+
+        # 3. 發送市價平倉單 (reduceOnly 確保只平倉)
+        try:
+            close_params = {
+                "symbol": symbol,
+                "side": close_side,
+                "type": "MARKET",
+                "quantity": f"{qty}", # 使用原始開倉數量
+                "reduceOnly": "true"
+            }
+            close_res = self._post("/fapi/v1/order", close_params)
+            print(f"Successfully sent MARKET close order for {symbol}: {close_res.get('orderId')}")
+
+            # 4. 計算近似 PnL
+            approx_pnl_pct = None
+            if approx_exit_price:
+                pct = (approx_exit_price - entry) / entry if entry > 0 else 0
+                if side == "SHORT": pct = -pct
+                approx_pnl_pct = pct
+
+            # 5. 清除內部狀態 (無論 PnL 是否算成功)
+            self.open = None
+            return True, approx_pnl_pct, approx_exit_price
+
+        except Exception as e:
+            # --- 以下是 except 區塊，必須縮排 ---
+            error_message = f"FATAL: Failed to send MARKET close order for {symbol}. Error: {e}"
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_message += f" | Response: {e.response.status_code} {e.response.text}"
+                except Exception:
+                    pass
+            print(error_message)
+            # --- 縮排結束 ---
+
+            # 平倉失敗，保持 self.open 狀態不變
+            return False, None, None

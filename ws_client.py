@@ -7,6 +7,7 @@ _WS_THREAD = None
 _WS_STOP = False
 _SUBS: List[str] = [] # Track current subscriptions
 _HOST = {"test": "wss://stream.binancefuture.com", "main": "wss://fstream.binance.com"}
+_RECEIVED_TICKER_SYMBOLS = set() # <--- 新增這一行
 
 # --- 全域快取 ---
 # 1. 價格快取
@@ -43,6 +44,12 @@ def _on_ticker(msg: dict):
     s = msg.get("s")
     c = msg.get("c")
     if s and c:
+        # --- 加入 Debug Print ---
+        # 只有第一次收到某幣種的 ticker 時才打印，避免洗版
+        if s not in _RECEIVED_TICKER_SYMBOLS:
+            print(f"DEBUG WS: Received first ticker update for {s}")
+            _RECEIVED_TICKER_SYMBOLS.add(s)
+        # --- 結束 Debug Print ---
         try:
             _PRICE[s] = float(c)
         except ValueError:
@@ -141,4 +148,5 @@ def stop_ws():
     _PRICE.clear() # Clear cache on stop
     _AGG.clear()
     _SUBS = [] # Clear subscriptions list
+    _RECEIVED_TICKER_SYMBOLS.clear() # <--- 新增這一行
     print("WebSocket stopped.")

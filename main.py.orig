@@ -5,61 +5,63 @@ import time, os
 from dotenv import load_dotenv
 
 from config import (USE_WEBSOCKET, USE_TESTNET, USE_LIVE, SCAN_INTERVAL_S, DAILY_TARGET_PCT, DAILY_LOSS_CAP,
-                    PER_TRADE_RISK, SCAN_TOP_N, ALLOW_SHORT)
+                    PER_TRADE_RISK, SCAN_TOP_N, ALLOW_SHORT, 
+                    LARGE_TRADES_EARLY_EXIT_PCT) # <-- 匯入 ALLOW_SHORT
 from utils import fetch_top_gainers, SESSION
-from risk_frame import DayGuard, position_size_notional, compute_bracket
+from risk_frame import DayGuard, position_size_notional, compute_bracket # compute_bracket 現在需要 atr
 from adapters import SimAdapter, LiveAdapter
-from signal_volume_breakout import volume_breakout_ok, volume_breakdown_ok
+from signal_volume_breakout import get_vbo_long_signal, get_vbo_short_signal # <-- 修改匯入
 from panel import live_render
 from ws_client import start_ws, stop_ws
 import threading
 from journal import log_trade
 import sys, threading, termios, tty, select, math
-from utils import load_exchange_info, EXCHANGE_INFO, update_time_offset
+from utils import load_exchange_info, EXCHANGE_INFO, update_time_offset, ws_best_price
+from signal_large_trades_ws import large_trades_signal_ws, near_anchor_ok
 
 def state_iter():
-    # hotkeys local imports (ensure available even if top-level imports failed)
-    import sys, threading, termios, tty, select  # hotkeys
+    # hotkeys local imports
+    import sys, threading, termios, tty, select
 
     load_dotenv(override=True)
-    load_exchange_info() # <-- 新增：在啟動時載入精度規則
+    load_exchange_info() # 啟動時載入精度規則
 
     day = DayGuard()
     adapter = LiveAdapter() if USE_LIVE else SimAdapter()
 
-    # --- 修正：從 API 獲取真實餘額，而不是 .env ---
+    # --- 獲取初始餘額 ---
     if USE_LIVE:
         try:
             equity = adapter.balance_usdt()
-            print(f"--- 成功獲取初始餘額: {equity:.2f} USDT ---")
+            print(f"--- Successfully fetched initial balance: {equity:.2f} USDT ---")
         except Exception as e:
-            print(f"--- 致命錯誤：無法獲取初始餘額: {e} ---")
-            print("請檢查 API Key 權限或 .env 設定。程式即將退出。")
-            sys.exit(1) # 退出程式
+            print(f"--- FATAL: Cannot fetch initial balance: {e} ---")
+            print("Check API Key permissions or .env settings. Exiting.")
+            sys.exit(1)
     else:
-        equity = float(os.getenv("EQUITY_USDT", "10000")) # 模擬模式
-        print(f"--- 模擬 (SIM) 模式啟動，初始權益: {equity:.2f} USDT ---")
-        
+        equity = float(os.getenv("EQUITY_USDT", "10000"))
+        print(f"--- SIM Mode started with initial equity: {equity:.2f} USDT ---")
+
     start_equity = equity
     last_scan = 0
-    last_time_sync = time.time() # <-- 新增：記錄啟動時間
-    prev_syms = []
-    last_bal_ts = 0.0
+    last_time_sync = time.time()
+    last_info_sync = 0.0 # <-- 新增：上次 Exchange Info 同步時間
+    prev_syms = [] # <--- 用來儲存上次實際訂閱的幣種列表 (List)
     account = {"equity": equity, "balance": None, "testnet": USE_TESTNET}
     paused = {"scan": False}
     top10 = []
     events = []
     position_view = None
-    vbo_cache = {} # <-- 新增：VBO 訊號快取
-    # ---- anti-churn / re-entry guard ----
-    COOLDOWN_SEC = 3             # 平倉後全域冷卻，避免下一輪又馬上下單
-    REENTRY_BLOCK_SEC = 45       # 同一幣種平倉後禁止再次進場秒數
+    vbo_cache = {} # VBO 快取 (儲存 {"long": bool, "short": bool, "atr": float})
+    COOLDOWN_SEC = 3
+    REENTRY_BLOCK_SEC = 45
     cooldown = {"until": 0.0, "symbol_lock": {}}
 
     def log(msg, tag="SYS"):
         ts = datetime.now().strftime("%H:%M:%S")
         events.append((ts, f"{tag}: {msg}"))
-    # --- 非阻塞鍵盤監聽（p: 暫停/恢復掃描, x: 立即平倉, !: 今日停機） ---
+
+    # --- 鍵盤監聽 ---
     def _keyloop():
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
@@ -71,228 +73,339 @@ def state_iter():
                     ch = sys.stdin.read(1)
                     if ch == "p":
                         paused["scan"] = not paused["scan"]
-                        log(f"toggle pause -> {paused['scan']}", "KEY")
+                        log(f"Scan toggled -> {paused['scan']}", "KEY")
                     elif ch == "x":
                         if adapter.has_open():
                             try:
-                                sym = adapter.open["symbol"]
-                                entry = float(adapter.open["entry"])
-                                side = adapter.open["side"]
-                                nowp = adapter.best_price(sym)
-                                pct = (nowp-entry)/entry if side=="LONG" else (entry-nowp)/entry
-                                log_trade(sym, side, adapter.open.get("qty",0), entry, nowp, pct, "hotkey_x")
-                                day.on_trade_close(pct)
-                                adapter.open = None
-                                log("force close position", "KEY")
+                                log("Force close requested (Not implemented yet)", "KEY")
                             except Exception as e:
-                                log(f"close error: {e}", "KEY")
+                                log(f"Close error: {e}", "KEY")
                         else:
-                            log("no position to close", "KEY")
+                            log("No position to close", "KEY")
                     elif ch == "!":
                         day.state.halted = True
-                        log("manual HALT for today", "KEY")
+                        log("Manual HALT for today", "KEY")
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
-
     threading.Thread(target=_keyloop, daemon=True).start()
 
-
+    # --- 主迴圈 ---
     while True:
-        t_now = time.time() # 取得一次當前時間
+        t_now = time.time()
         day.rollover()
-        # --- 新增：修復時間漂移 (Issue #2) ---
-        if t_now - last_time_sync > 1800: # 每 30 分鐘 (1800 秒)
-            try:
-                new_offset = update_time_offset()
-                log(f"Time offset re-synced: {new_offset} ms", "SYS")
-                last_time_sync = t_now
-            except Exception as e:
-                log(f"Time offset sync failed: {e}", "ERROR")
-                last_time_sync = t_now # 即使失敗也更新時間，避免 0.8s 後重試
-        # --- 結束 ---
 
-                # 1) 平倉監控
+# --- (新) 定時刷新 Exchange Info ---
+        if t_now - last_info_sync > 3600: # 每小時 (3600 秒)
+             try:
+                 load_exchange_info() # 重新載入精度規則
+                 last_info_sync = t_now
+                 log("Exchange info refreshed periodically", "SYS")
+             except Exception as e:
+                 log(f"Periodic exchange info refresh failed: {e}", "ERROR")
+                 last_info_sync = t_now # 即使失敗也更新時間，避免 0.8s 後重試
+
+        # --- 持倉管理 ---
         if adapter.has_open():
             try:
                 closed, pct, sym = adapter.poll_and_close_if_hit(day)
             except Exception as e:
-                log(f"poll error: {e}")
+                log(f"Poll error: {e}", "POLL")
                 closed, pct, sym = False, None, None
 
-            if closed:
-                log(f"CLOSE {sym} pct={pct*100:.2f}% day={day.state.pnl_pct*100:.2f}%")
-                # 冷卻避免馬上下單、並讓下一輪立即抓 balance
-                cooldown["until"] = time.time() + COOLDOWN_SEC
-                last_bal_ts = 0.0
+            # --- (修改) 檢查並執行反向大單提前出場 ---
+            if not closed and adapter.has_open() and adapter.open: # 再次檢查確保 closed 後 adapter.open 可能已被清空
+                early_exit_triggered = False
+                exit_reason = "lt_early_exit"
+                exit_anchor = None
+                try:
+                    sym = adapter.open["symbol"]
+                    side = adapter.open["side"]
+                    lt = large_trades_signal_ws(sym) or {}
+                    nowp = ws_best_price(sym) # 獲取價格用於 near_anchor_ok
 
-                # --- 修正：平倉後立即更新權益 (equity) ---
+                    if nowp:
+                        nowp_float = float(nowp)
+                        # --- 修改：加入 EARLY_EXIT_PCT 門檻 ---
+                        sell_rank = lt.get("sell_pct_rank")
+                        buy_rank = lt.get("buy_pct_rank")
+
+                        # 做多時，檢查賣單排名是否超過出場門檻
+                        if side == "LONG" and sell_rank is not None and sell_rank >= LARGE_TRADES_EARLY_EXIT_PCT and near_anchor_ok(nowp_float, lt.get("sell_anchor")):
+                            early_exit_triggered = True
+                            exit_anchor = lt.get('sell_anchor')
+                            log(f"LT Early Exit Triggered (Large Sell Rank={sell_rank:.1f}% >= {LARGE_TRADES_EARLY_EXIT_PCT}%)", sym) # 加入排名資訊
+
+                        # 做空時，檢查買單排名是否超過出場門檻
+                        elif side == "SHORT" and buy_rank is not None and buy_rank >= LARGE_TRADES_EARLY_EXIT_PCT and near_anchor_ok(nowp_float, lt.get("buy_anchor")):
+                            early_exit_triggered = True
+                            exit_anchor = lt.get('buy_anchor')
+                            log(f"LT Early Exit Triggered (Large Buy Rank={buy_rank:.1f}% >= {LARGE_TRADES_EARLY_EXIT_PCT}%)", sym) # 加入排名資訊
+                        # --- 結束 ---
+
+                    if early_exit_triggered:
+                        # --- 執行市價平倉 ---
+                        close_success, approx_pnl, approx_exit = adapter.force_close_position(sym, reason=exit_reason)
+                        if close_success:
+                            # --- 平倉成功後的處理 ---
+                            closed = True # 標記為已平倉，避免後續 poll 再次處理
+                            pct = approx_pnl if approx_pnl is not None else 0.0 # 使用近似 PnL
+                            log(f"FORCE CLOSE {sym} Approx PnL={pct*100:.2f}% (Reason: {exit_reason})", "TRADE")
+                            day.on_trade_close(pct) # 更新日內風控狀態
+                            position_view = None # 清除面板顯示
+                            cooldown["until"] = time.time() + COOLDOWN_SEC # 觸發全域冷卻
+                            cooldown["symbol_lock"][sym] = time.time() + REENTRY_BLOCK_SEC # 觸發幣種冷卻
+
+                            # --- 記錄到 journal.csv ---
+                            try:
+                                # 需要原始開倉信息來記錄 journal
+                                # 但 force_close_position 成功後 adapter.open 被清空了
+                                # 我們需要在 force_close_position 之前保存必要信息，或者修改 force_close_position 回傳更多信息
+                                # 暫時無法精確記錄 journal，只記錄事件
+                                log(f"Journal entry skipped for force close due to missing open data after close.", "WARN")
+                                # TODO: Refactor force_close_position or state management for accurate journaling on early exit.
+                            except Exception as je:
+                                log(f"Journal logging error after force close: {je}", "ERROR")
+
+                        else:
+                            # force_close_position 失敗，保持 closed = False，讓下次輪詢重試
+                            log(f"Force close attempt failed for {sym}, will retry poll.", "ERROR")
+
+                except Exception as ee:
+                     log(f"Error during early exit check: {ee}", "ERROR")
+                     pass # 檢查失敗不影響主邏輯
+            # --- 結束 ---
+
+            if closed:
+                log(f"CLOSE {sym} PnL={pct*100:.2f}% | Day={day.state.pnl_pct*100:.2f}%", "TRADE")
+                cooldown["until"] = time.time() + COOLDOWN_SEC
+                cooldown["symbol_lock"][sym] = time.time() + REENTRY_BLOCK_SEC
+
+                # --- 更新權益 ---
                 try:
                     if USE_LIVE:
-                        equity = adapter.balance_usdt() # 更新用於下單的 equity
-                        account["balance"] = equity    # 更新用於顯示的 balance
+                        equity = adapter.balance_usdt()
+                        account["balance"] = equity
                         log(f"Balance updated: {equity:.2f}", "SYS")
                     else:
-                        # 模擬模式：用 PnL 計算
                         equity = start_equity * (1.0 + day.state.pnl_pct)
                 except Exception as e:
                     log(f"Balance update failed: {e}", "SYS")
-                    equity = start_equity * (1.0 + day.state.pnl_pct) # 失敗時回退
-                # --- 修正結束 ---
-                
+                    equity = start_equity * (1.0 + day.state.pnl_pct)
+
                 position_view = None
+
+        # --- 無持倉：掃描 & 進場 ---
         else:
-            # 2) 無持倉：若未停機，掃描與找入場
-            
             if not day.state.halted:
-                # t = time.time() # <-- 這行可以刪了
+                # --- 掃描 TopN & 快取 VBO (含 ATR) ---
                 if not paused["scan"] and (t_now - last_scan > SCAN_INTERVAL_S):
                     try:
-                        top10 = fetch_top_gainers(SCAN_TOP_N) # <-- 修正 1: 使用變數
+                        top10 = fetch_top_gainers(SCAN_TOP_N) # 取得 TopN 列表
                         last_scan = t_now
-                        
-                        # --- 核心優化：在這裡快取 VBO 訊號 ---
+
+                        # --- VBO 快取 ---
                         new_cache = {}
                         for s, pct, last, vol in top10:
-                            # 修正 2: 呼叫 API (這才會發起請求)
-                            new_cache[s] = volume_breakout_ok(s)
-                        vbo_cache = new_cache # 原子化更新快取
-                        # --- 優化結束 ---
+                            long_ok, atr_long = get_vbo_long_signal(s)
+                            short_ok, atr_short = get_vbo_short_signal(s) if ALLOW_SHORT else (False, None)
+                            new_cache[s] = {
+                                "long": long_ok,
+                                "short": short_ok,
+                                "atr": atr_long if atr_long is not None and atr_long > 0 else (atr_short if atr_short is not None and atr_short > 0 else None)
+                            }
+                        vbo_cache = new_cache
+                        log(f"Scan top{SCAN_TOP_N} OK, VBO cache updated", "SCAN")
 
-                        log(f"top{SCAN_TOP_N} ok", "SCAN")
-                        
+                        # --- WebSocket 訂閱管理 (核心修改點) ---
                         if USE_WEBSOCKET:
-                            syms = [t[0] for t in top10]
-                            if syms != prev_syms:
-                                start_ws(syms, USE_TESTNET)
-                                prev_syms = syms
-                    except Exception as e:
-                        log(f"scan error: {e}", "SCAN")
+                            # 1. 取得 TopN 幣種列表
+                            top_n_syms = [t[0] for t in top10]
 
-                # 由上而下找第一個符合量價突破
-                # 由上而下找第一個符合量價突破
-                # 若還在冷卻，暫不找進場
-                if time.time() < cooldown["until"]:
+                            # 2. 取得當前持倉幣種 (如果有的話)
+                            current_position_sym = None
+                            if adapter.has_open() and adapter.open: # 檢查 adapter.open 是否存在
+                                current_position_sym = adapter.open.get("symbol")
+
+                            # 3. 合併列表並去重，得到需要訂閱的集合
+                            syms_to_subscribe_set = set(top_n_syms)
+                            if current_position_sym:
+                                syms_to_subscribe_set.add(current_position_sym)
+
+                            # 4. 比較當前需要訂閱的集合 與 上次實際訂閱的集合
+                            current_set_to_subscribe = syms_to_subscribe_set
+                            previous_subscribed_set = set(prev_syms) # prev_syms 存的是上次 start_ws 的列表
+
+                            symbols_changed_count = len(current_set_to_subscribe.symmetric_difference(previous_subscribed_set))
+                            RELOAD_THRESHOLD = 5 # 差異超過 5 個幣才重啟
+
+                            # 5. 判斷是否需要重啟 WebSocket
+                            needs_restart = False
+                            if current_set_to_subscribe != previous_subscribed_set: # 集合內容不同
+                                if not prev_syms: # 如果是第一次啟動
+                                     needs_restart = True
+                                     print("DEBUG: First WebSocket subscription.")
+                                elif symbols_changed_count > RELOAD_THRESHOLD: # 或者差異超過門檻
+                                     needs_restart = True
+                                     print(f"DEBUG: Symbol set changed significantly ({symbols_changed_count} changes > {RELOAD_THRESHOLD}). Reloading WebSocket.")
+                                     diff_added = current_set_to_subscribe - previous_subscribed_set
+                                     diff_removed = previous_subscribed_set - current_set_to_subscribe
+                                     if diff_added: print(f"DEBUG: Added symbols: {diff_added}")
+                                     if diff_removed: print(f"DEBUG: Removed symbols: {diff_removed}")
+                                # else: # Debugging (Optional):
+                                #     print(f"DEBUG: Symbol set changed ({symbols_changed_count} changes <= {RELOAD_THRESHOLD}). WS not reloaded.")
+
+                            # 6. 如果需要重啟，執行重啟並更新 prev_syms
+                            if needs_restart:
+                                syms_to_subscribe_list = list(current_set_to_subscribe) # 使用最新的集合轉換列表
+                                start_ws(syms_to_subscribe_list, USE_TESTNET)
+                                prev_syms = syms_to_subscribe_list # 更新 prev_syms 為本次實際訂閱的列表
+
+                    except Exception as e:
+                        log(f"Scan/Cache/WS error: {e}", "SCAN") # 修改 Log 訊息
+
+                # --- 尋找進場候選 ---
+                if t_now < cooldown["until"]:
                     candidate = None
                 else:
                     candidate = None
-                for s, pct, last, vol in top10:
-                    # 檢查同幣種 re-entry 鎖
-                    lock_until = cooldown['symbol_lock'].get(s, 0)
-                    if time.time() < lock_until:
-                        continue
-                    # --- 修正 4：從快取讀取 VBO 訊號 ---
-                    if vbo_cache.get(s, False):
-                        candidate = (s, last); break
+                    nowp_cache = {}
 
+                    for s, pct, last, vol in top10: # 仍然只在 TopN 中尋找機會
+                        if t_now < cooldown['symbol_lock'].get(s, 0):
+                            continue
+
+                        vbo_data = vbo_cache.get(s, {})
+                        ok_vbo_long = vbo_data.get("long", False)
+                        ok_vbo_short = vbo_data.get("short", False)
+                        atr_value = vbo_data.get("atr")
+
+                        lt = large_trades_signal_ws(s) or {}
+                        ok_lt_long = False
+                        ok_lt_short = False
+
+                        if lt.get("buy_signal") or lt.get("sell_signal"):
+                            try:
+                                nowp = ws_best_price(s)
+                                if nowp is None: nowp = last
+                                nowp_float = float(nowp)
+                                nowp_cache[s] = nowp_float
+
+                                if lt.get("buy_signal"):
+                                    ok_lt_long = near_anchor_ok(nowp_float, lt.get("buy_anchor"))
+                                if ALLOW_SHORT and lt.get("sell_signal"):
+                                    ok_lt_short = near_anchor_ok(nowp_float, lt.get("sell_anchor"))
+                            except Exception:
+                                nowp_cache[s] = last
+
+                        # --- 整合訊號 (加入 ATR 檢查) ---
+                        if (ok_vbo_long or ok_lt_long):
+                            if atr_value is None or atr_value <= 0:
+                                continue
+                            entry_price = float(nowp_cache.get(s, last) if ok_lt_long else last)
+                            candidate = (s, entry_price, "LONG", atr_value)
+                            log(f"Signal: LONG (VBO:{ok_vbo_long}, LT:{ok_lt_long}) ATR:{atr_value:.4g} @{entry_price:.6g}", s)
+                            break
+
+                        if ALLOW_SHORT and (ok_vbo_short or ok_lt_short):
+                            if atr_value is None or atr_value <= 0:
+                                continue
+                            entry_price = float(nowp_cache.get(s, last) if ok_lt_short else last)
+                            candidate = (s, entry_price, "SHORT", atr_value)
+                            log(f"Signal: SHORT (VBO:{ok_vbo_short}, LT:{ok_lt_short}) ATR:{atr_value:.4g} @{entry_price:.6g}", s)
+                            break
+
+                # --- 執行下單 ---
                 if candidate:
-                    symbol, entry = candidate
-                    side = "LONG"
-                    notional = position_size_notional(equity)
+                    symbol, entry, side, atr_for_trade = candidate
 
-                    # --- 修正：使用 ExchangeInfo 進行精確計算 (含即時刷新) ---
+                    # --- 計算精度 ---
                     try:
-                        # 1. 嘗試從 (可能過期的) 緩存獲取精度
                         prec = EXCHANGE_INFO[symbol]
                         qty_prec = prec['quantityPrecision']
                         price_prec = prec['pricePrecision']
                     except KeyError:
-                        # 2. 緩存中沒有 (可能是新幣 AINUSDT)，觸發「即時刷新」
                         log(f"No exchange info for {symbol}. Attempting live refresh...", "SYS")
                         try:
-                            # 呼叫 utils 函數，刷新全域 EXCHANGE_INFO
                             load_exchange_info()
-                            
-                            # 3. 再次嘗試從 (剛刷新的) 緩存中獲取
                             prec = EXCHANGE_INFO[symbol]
                             qty_prec = prec['quantityPrecision']
                             price_prec = prec['pricePrecision']
                             log(f"Successfully refreshed info for {symbol}", "SYS")
-
                         except KeyError:
-                            # 4. 刷新後 "仍然" 沒有 (代表這是下市幣 TAGUSDT 或現貨幣)
-                            #    啟動「猜測模式」作為最後手段
                             log(f"Refresh failed. {symbol} not in official list. Using fallback guess.", "ERR")
-                            qty_prec = 0 # 數量取整數 (這個 OK)
-
-                            # --- 修正：動態猜測價格精度 (更精確) ---
-                            s_entry = f"{entry:.15f}" # 用 f 格式保留所有小數
+                            qty_prec = 0
+                            s_entry = f"{entry:.15f}"
                             if '.' in s_entry:
                                 decimals = s_entry.split('.')[-1]
                                 non_zero_idx = -1
                                 for i, char in enumerate(decimals):
-                                    if char != '0':
-                                        non_zero_idx = i
-                                        break
-                                if non_zero_idx != -1:
-                                    price_prec = non_zero_idx + 3 # 在第一個非零數字後再保留 3 位
-                                else:
-                                    price_prec = 4 # 預設
-                            else:
-                                price_prec = 0
-                            
-                            price_prec = min(price_prec, 8) # 最多 8 位
+                                    if char != '0': non_zero_idx = i; break
+                                price_prec = (non_zero_idx + 3) if non_zero_idx != -1 else 4
+                            else: price_prec = 0
+                            price_prec = min(price_prec, 8)
                             log(f"Guessed price_prec={price_prec} for {symbol}", "SYS")
-                            # --- 修正結束 ---
-                    
-                    # 2. 計算並格式化 Qty (數量)
-                    # 數量必須用 math.floor 進行「無條件捨去」到指定精度
+
+                    # --- 計算數量 & SL/TP ---
+                    if atr_for_trade is None or atr_for_trade <= 0:
+                        log(f"ORDER FAILED for {symbol}: Invalid ATR value {atr_for_trade} before pos sizing", "ERROR")
+                        continue
+
+                    notional = position_size_notional(equity, entry, atr_for_trade)
+                    if notional <= 0:
+                        log(f"Skipping {symbol}, calculated notional <= 0", "SYS")
+                        continue
+
                     qty_raw = notional / entry
                     qty_factor = 10**qty_prec
                     qty = math.floor(qty_raw * qty_factor) / qty_factor
 
-                    if qty == 0.0:
-                        log(f"Skipping {symbol}, calculated qty is zero (Notional={notional:.2f})", "SYS")
-                        cooldown["until"] = time.time() + 1 # 避免
-                        continue # 跳過此候選
+                    if qty <= 0.0:
+                        log(f"Skipping {symbol}, calculated qty <= 0 (Notional={notional:.2f})", "SYS")
+                        cooldown["until"] = time.time() + 1
+                        continue
 
-                    # 3. 計算並格式化 Price (價格)
-                    # 價格使用 round (四捨五入) 到指定精度
-                    sl_raw, tp_raw = compute_bracket(entry, side)
-                    
+                    sl_raw, tp_raw = compute_bracket(entry, side, atr_for_trade)
+                    if sl_raw is None or tp_raw is None:
+                        log(f"ORDER FAILED for {symbol}: Cannot compute SL/TP (ATR={atr_for_trade})", "ERROR")
+                        continue
+
                     sl = round(sl_raw, price_prec)
                     tp = round(tp_raw, price_prec)
-                    entry = round(entry, price_prec) # 也格式化 entry
-                    
-                    # --- 修正結束 ---
+                    entry_fmt = round(entry, price_prec)
 
+                    # --- 下單 (含錯誤捕捉) ---
                     try:
-                        # --- 修復：捕捉下單時的所有錯誤 (Issue #1) ---
-                        adapter.place_bracket(symbol, side, qty, entry, sl, tp)
-                        
-                        # 只有在下單成功時，才執行以下動作
-                        position_view = {"symbol":symbol, "side":side, "qty":qty, "entry":entry, "sl":sl, "tp":tp}
-                        log(f"OPEN {symbol} qty={qty} entry={entry:.6f}", "ORDER")
+                        adapter.place_bracket(symbol, side, qty, entry_fmt, sl, tp)
+                        position_view = {"symbol":symbol, "side":side, "qty":qty, "entry":entry_fmt, "sl":sl, "tp":tp}
+                        log(f"OPEN {side} {symbol} Qty={qty:.{qty_prec}f} @{entry_fmt:.{price_prec}f} SL={sl:.{price_prec}f} TP={tp:.{price_prec}f}", "ORDER")
                         cooldown["until"] = time.time() + COOLDOWN_SEC
-                        cooldown["symbol_lock"][symbol] = time.time() + REENTRY_BLOCK_SEC
-
                     except Exception as e:
-                        # 捕捉 TimeoutError, HTTPError, Insufficient Margin 等
                         log(f"ORDER FAILED for {symbol}: {e}", "ERROR")
-                        # (發生錯誤時，我們只記錄日誌，然後繼續下一輪迴圈，程式不再崩潰)
                         pass
 
-        # 依照可用資訊更新 Equity (顯示用)
-        # (實際的 equity 變數已在啟動時和平倉後更新)
+        # --- 更新面板狀態 ---
         account["equity"] = equity
-        if USE_LIVE and account.get("balance") is None: # 處理第一次啟動時
+        if USE_LIVE and account.get("balance") is None:
             account["balance"] = equity
 
-        # 3) 輸出給面板
         yield {
             "top10": top10,
-            "day_state": day.state,
-            "position": adapter.open if hasattr(adapter, "open") else (None if position_view is None else position_view),
+            "day_state": day.state, # <--- 修正點
+            "position": adapter.open if adapter.has_open() and adapter.open else position_view,
             "events": events,
             "account": account,
         }
-
         time.sleep(0.8)
 
+# --- 主程式入口 ---
 if __name__ == "__main__":
     try:
         live_render(state_iter())
+    except KeyboardInterrupt: # 優雅處理 Ctrl+C
+        print("\nCtrl+C detected. Exiting gracefully...")
     finally:
         try:
             stop_ws()
         except Exception:
             pass
+        print("\n--- Bot stopped ---")

@@ -1,6 +1,6 @@
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import time
+import time,random
 import statistics
 import requests
 from datetime import datetime, timezone
@@ -15,6 +15,61 @@ SESSION.headers.update({"User-Agent": "daily-gainer-bot/vC"})
 SESSION.headers.update({"Cache-Control": "no-cache"})
 EXCLUDE_KEYWORDS = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT", "BUSD")
 
+# --- Binance REST endpoints（期貨 FAPI） ---
+_BINANCE_FAPI_BASES = [
+    "https://fapi1.binance.com",
+    "https://fapi2.binance.com",
+    # 預備：主域名也可做 fallback（有些網路環境對 fapi1/2 不友善）
+    "https://fapi.binance.com",
+]
+
+# 供 round-robin 取用
+__ep_idx = 0
+
+def _choose_endpoint(path: str) -> str:
+    """
+    回傳帶 base 的完整 URL。
+    與舊版相容：允許傳入以 '/' 開頭的 path。
+    """
+    global __ep_idx
+    base = _BINANCE_FAPI_BASES[__ep_idx % len(_BINANCE_FAPI_BASES)]
+    __ep_idx += 1
+    if path.startswith("/"):
+        return base + path
+    return f"{base}/{path}"
+
+def _request_json(session, method: str, path: str, params=None, max_retry: int = 3, timeout: float = 10.0):
+    """
+    小型請求器：處理 202/429/5xx，自動換 endpoint 重試。
+    與你現有呼叫點相容：用 path 丟進來即可（例如 '/fapi/v1/ticker/24hr'）。
+    """
+    for attempt in range(max_retry):
+        url = _choose_endpoint(path)
+        try:
+            r = session.request(method, url, params=params, timeout=timeout)
+        except Exception:
+            # 網路錯誤 -> 短暫睡一下再換下一個 endpoint
+            time.sleep(0.2 + 0.3 * attempt)
+            continue
+
+        # 正常
+        if r.status_code == 200:
+            return r.json()
+
+        # 常見暫時性狀態：202/429/5xx -> 換 endpoint 重試
+        if r.status_code in (202, 429) or 500 <= r.status_code < 600:
+            print(f"Warning: Received {r.status_code} from {url}. Treating as temporary failure, retrying...")
+            time.sleep(0.2 + 0.3 * attempt)
+            continue
+
+        # 其他狀態碼（例如 4xx 非 429）直接 raise
+        try:
+            r.raise_for_status()
+        except Exception as e:
+            raise e
+
+    # 超過重試次數
+    raise RuntimeError(f"Request failed after {max_retry} retries for path={path}")
 # --- 全域變數 ---
 TIME_OFFSET_MS = 0 # 時間偏移
 EXCHANGE_INFO = {} # 精度規則
@@ -54,20 +109,16 @@ def fetch_top_losers(n: int = 10):
     跌幅榜（和 fetch_top_gainers 結構一致）：
     回傳 [(symbol, priceChangePercent, lastPrice, quoteVolume), ...] 取前 n 名。
     """
-    url = _choose_endpoint("/fapi/v1/ticker/24hr")  # 與漲幅榜同來源
     try:
-        r = SESSION.get(url, timeout=5)
-        if r.status_code == 202:
-            # 與你現有邏輯一致的暫失敗處理
-            raise RuntimeError("HTTP 202 from Binance")
-        r.raise_for_status()
-        data = r.json()
+        # ✅ 統一走 _rest_json（內含多主機輪詢 + 202/429/5xx 處理）
+        data = _rest_json("/fapi/v1/ticker/24hr", timeout=6, tries=3)
+
         rows = []
         for item in data:
             s = item.get("symbol")
             if not s or not s.endswith("USDT"):
                 continue
-            if s in SYMBOL_BLACKLIST:   # 你 utils 內已有的黑名單
+            if s in SYMBOL_BLACKLIST:
                 continue
             try:
                 pct  = float(item.get("priceChangePercent", 0.0))
@@ -75,10 +126,15 @@ def fetch_top_losers(n: int = 10):
                 vol  = float(item.get("quoteVolume", 0.0))
             except Exception:
                 continue
+            # 僅保留有效數據
+            if last <= 0 or vol <= 0:
+                continue
             rows.append((s, pct, last, vol))
+
         # 依跌幅排序（最負在最前面）
         rows.sort(key=lambda x: x[1])
         return rows[:n]
+
     except Exception as e:
         print(f"Warning(fetch_top_losers): {e}")
         return []

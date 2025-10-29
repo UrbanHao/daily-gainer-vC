@@ -49,6 +49,39 @@ def fetch_top_gainers(limit=10):
         items.append((s, pct, last, quote_vol))
     items.sort(key=lambda t: t[1], reverse=True)
     return items[:limit]
+def fetch_top_losers(n: int = 10):
+    """
+    跌幅榜（和 fetch_top_gainers 結構一致）：
+    回傳 [(symbol, priceChangePercent, lastPrice, quoteVolume), ...] 取前 n 名。
+    """
+    url = _choose_endpoint("/fapi/v1/ticker/24hr")  # 與漲幅榜同來源
+    try:
+        r = SESSION.get(url, timeout=5)
+        if r.status_code == 202:
+            # 與你現有邏輯一致的暫失敗處理
+            raise RuntimeError("HTTP 202 from Binance")
+        r.raise_for_status()
+        data = r.json()
+        rows = []
+        for item in data:
+            s = item.get("symbol")
+            if not s or not s.endswith("USDT"):
+                continue
+            if s in SYMBOL_BLACKLIST:   # 你 utils 內已有的黑名單
+                continue
+            try:
+                pct  = float(item.get("priceChangePercent", 0.0))
+                last = float(item.get("lastPrice", 0.0))
+                vol  = float(item.get("quoteVolume", 0.0))
+            except Exception:
+                continue
+            rows.append((s, pct, last, vol))
+        # 依跌幅排序（最負在最前面）
+        rows.sort(key=lambda x: x[1])
+        return rows[:n]
+    except Exception as e:
+        print(f"Warning(fetch_top_losers): {e}")
+        return []
 
 def fetch_klines(symbol, interval, limit):
     # 確保 limit 是正整數

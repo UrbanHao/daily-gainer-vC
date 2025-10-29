@@ -9,6 +9,15 @@ SYMBOL_BLACKLIST = [
     "BNXUSDT",
     # 在這裡加入其他你想拉黑的幣種 (記得加引號和逗號)
 ]
+# K 線週期（幣安 Futures 常見：1m, 3m, 5m, 15m, 1h ...）
+KLINE_INTERVAL = os.getenv("KLINE_INTERVAL", "5m")
+KLINE_INTERVAL = os.getenv("KLINE_INTERVAL", "5m")
+KLINE_LIMIT    = int(os.getenv("KLINE_LIMIT", "200"))
+
+# 下面這幾個如果你的 VBO 需要，就一併放開；若你原本有就保留你的值
+VBO_LOOKBACK_BARS = int(os.getenv("VBO_LOOKBACK_BARS", "96"))     # 例如過去 8 小時(5m x 96)
+VBO_VOL_MULT      = float(os.getenv("VBO_VOL_MULT", "2.0"))       # 放量倍數門檻
+VBO_PCT_BREAK     = float(os.getenv("VBO_PCT_BREAK", "0.004"))    # 漲幅突破門檻 0.4% 舉例
 
 DAILY_TARGET_PCT = float(os.getenv("DAILY_TARGET_PCT", "0.15"))     # 當日達標 +15%
 DAILY_LOSS_CAP   = float(os.getenv("DAILY_LOSS_CAP", "-0.05"))      # 當日最大虧損 -5%

@@ -226,9 +226,12 @@ def state_iter():
                         new_cache = {}
                         symbols_for_ws = set()
                         symbols_processed_count = 0
+                        # 只處理一小批，其他留到下輪（例如每輪最多 12 檔）
+                        SYMBOLS_PER_SCAN = 12
+                        symbols_batch = list(all_symbols_to_check.values())[:SYMBOLS_PER_SCAN]
 
-                        # --- 先抓一次 K 線，再計算訊號（不再觸發「expected 4, got 2」） ---
-                        for idx, (symbol, pct, last, vol) in enumerate(all_symbols_to_check.values()):
+                        # --- 先抓一次 K 線，再計算訊號 ---
+                        for idx, (symbol, pct, last, vol) in enumerate(symbols_batch):
                             symbols_for_ws.add(symbol)
 
                             long_ok = False
@@ -260,7 +263,7 @@ def state_iter():
                             }
 
                             # 對每個 symbol 做輕微延遲（維持你原本節流）
-                            time.sleep(0.3)
+                            time.sleep(0.06 + random.random() * 0.04)  # 0.06~0.10 秒不等
 
                         vbo_cache = new_cache
                         log(f"VBO cache updated for {symbols_processed_count}/{len(all_symbols_to_check)} symbols.", "SCAN")

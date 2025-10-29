@@ -139,25 +139,61 @@ def fetch_top_losers(n: int = 10):
         print(f"Warning(fetch_top_losers): {e}")
         return []
 
+# 放在檔案頂部已有 import 後面（若無 random 請加上）
+import time, random
+
+# 簡單記憶體快取：（symbol, interval） -> { "ts": 上次成功時間, "data": (closes, highs, lows, vols) }
+_KLINE_CACHE = {}
+_KLINE_CACHE_TTL = 20.0  # 成功資料可沿用 20 秒，避免 202 時瘋狂打 API
+
 def fetch_klines(symbol, interval, limit):
-    # 確保 limit 是正整數
-    limit = max(1, int(limit))
-    rows = _rest_json("/fapi/v1/klines", params={"symbol":symbol, "interval":interval, "limit":limit}, timeout=6, tries=3)
-    # 增加檢查確保 rows 是列表且元素是列表或元組
-    if not isinstance(rows, list): return [], [], [], []
-    closes, highs, lows, vols = [], [], [], []
-    for k in rows:
-         if isinstance(k, (list, tuple)) and len(k) >= 6:
-             try:
-                 closes.append(float(k[4]))
-                 highs.append(float(k[2]))
-                 lows.append(float(k[3]))
-                 vols.append(float(k[5]))
-             except (ValueError, TypeError, IndexError):
-                 continue # 跳過格式錯誤的 K 線數據
-         else:
-             continue # 跳過格式錯誤的 K 線數據
-    return closes, highs, lows, vols
+    """
+    回傳四個 list: closes, highs, lows, vols
+    - 先看快取（20 秒內）直接回
+    - 若 API 回 202/429/5xx，最多重試 2 次；若仍失敗但有快取 → 回快取
+      沒快取才 raise 讓呼叫端略過該檔
+    """
+    cache_key = (symbol, interval)
+    now = time.time()
+
+    # 1) 有新鮮快取 → 直接回
+    if cache_key in _KLINE_CACHE:
+        c = _KLINE_CACHE[cache_key]
+        if now - c["ts"] <= _KLINE_CACHE_TTL:
+            return c["data"]
+
+    # 2) 打公開 REST（用你現成的 _rest_json；限制 tries=2；加一點隨機抖動）
+    #    注意：_rest_json 的 path 只放 path，底層會自己輪詢 base host
+    params = {"symbol": symbol, "interval": interval, "limit": int(limit)}
+    # 小抖動，避免同時間全打到同一主機
+    time.sleep(0.05 + random.random() * 0.05)
+
+    data = None
+    try:
+        data = _rest_json("/fapi/v1/klines", params=params, timeout=5, tries=2)
+    except Exception:
+        # 若 API 失敗但有舊快取，回舊快取；否則往上拋
+        if cache_key in _KLINE_CACHE:
+            return _KLINE_CACHE[cache_key]["data"]
+        raise
+
+    # 3) 解析成四個 list（保留你原本四清單約定）
+    try:
+        closes = [float(x[4]) for x in data]
+        highs  = [float(x[2]) for x in data]
+        lows   = [float(x[3]) for x in data]
+        vols   = [float(x[5]) for x in data]
+    except Exception as e:
+        # 解析失敗：若有舊快取則回舊快取；否則拋出
+        if cache_key in _KLINE_CACHE:
+            return _KLINE_CACHE[cache_key]["data"]
+        raise e
+
+    out = (closes, highs, lows, vols)
+
+    # 4) 寫入快取
+    _KLINE_CACHE[cache_key] = {"ts": now, "data": out}
+    return out
 
 
 def ema(vals, n):

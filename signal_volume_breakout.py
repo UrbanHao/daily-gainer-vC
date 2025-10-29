@@ -1,10 +1,11 @@
 import statistics
-from config import (KLINE_INTERVAL, KLINE_LIMIT, HH_N, OVEREXTEND_CAP,
-                    VOL_BASE_WIN, VOL_SPIKE_K, VOL_LOOKBACK_CONFIRM,
-                    EMA_FAST, EMA_SLOW, ATR_PERIOD,VBO_LOOKBACK_BARS, VBO_VOL_MULT, VBO_PCT_BREAK)
-
+from config import (
+    KLINE_INTERVAL, KLINE_LIMIT, HH_N, OVEREXTEND_CAP,
+    VOL_BASE_WIN, VOL_SPIKE_K, VOL_LOOKBACK_CONFIRM,
+    EMA_FAST, EMA_SLOW, ATR_PERIOD
+)
 # --- 移除 fetch_klines 的 import ---
-from utils import ema, calculate_atr # 只 import 需要的計算函數
+from utils import fetch_klines, ema, calculate_atr
 from typing import Tuple, Optional, List # <-- 加入 List
 
 # --- 修改：訊號函數接收 K 線數據 ---
@@ -156,31 +157,67 @@ def calculate_vbo_short_signal(closes: List[float], highs: List[float], lows: Li
 
 # === Thin wrapper for main.py compatibility ===
 # 不改動你的計算函數；只補一個 volume_breakout_ok(symbol) 讓 main.py 能呼叫。
-from utils import fetch_klines  # 需要這個來抓 REST K 線
 
 def volume_breakout_ok(symbol: str, interval: str = None) -> bool:
-    interval = interval or KLINE_INTERVAL
-    closes, highs, vols = fetch_klines(symbol, interval, limit=KLINE_LIMIT)
     """
-    與舊版相容：抓取 K 線 -> 轉成陣列 -> 丟給 calculate_vbo_long_signal。
-    只回傳是否觸發多頭 VBO（你的 main.py 目前只做 LONG）。
+    與舊版介面相同：只回傳 bool。
+    內部統一用 utils.fetch_klines，且接收 4 個 list，避免「expected 4, got 2」。
     """
     try:
-        # 取 K 線（Futures）：回傳通常是 list of [openTime, open, high, low, close, volume, ...]
-        kl = fetch_klines(symbol, KLINE_INTERVAL, limit=KLINE_LIMIT)
-        if not kl or len(kl) < 50:  # 粗略檢查，避免資料太短
+        interval = interval or KLINE_INTERVAL
+
+        # 1) 取 K 線（四個 list）
+        closes, highs, lows, vols = fetch_klines(symbol, interval, limit=KLINE_LIMIT)
+        if not closes or not highs or not lows or not vols:
             return False
 
-        # 轉陣列（字串轉 float）
-        opens  = [float(x[1]) for x in kl]
-        highs  = [float(x[2]) for x in kl]
-        lows   = [float(x[3]) for x in kl]
-        closes = [float(x[4]) for x in kl]
-        vols   = [float(x[5]) for x in kl]
+        # 2) 高點突破（避免過度延伸）
+        curr_close = closes[-1]
+        if HH_N > 0 and len(highs) > HH_N + 1:
+            prev_high = max(highs[-(HH_N + 1):-1])
+        elif len(highs) >= 2:
+            prev_high = highs[-2]
+        else:
+            return False
 
-        ok, _atr = calculate_vbo_long_signal(closes, highs, lows, vols)
-        return bool(ok)
-    except Exception as e:
-        # 不 raise，避免把整個快取流程打斷；交給 main 的 try/except 記 WARN
-        # 這裡保持安靜或 print 皆可；建議保持安靜，由 main 統一紀錄。
+        if prev_high <= 0 or curr_close <= prev_high:
+            return False
+
+        breakout_ratio = (curr_close - prev_high) / prev_high
+        if breakout_ratio > OVEREXTEND_CAP:
+            return False
+
+        # 3) 量能條件（最近 N 根總量 > 中位數 * K 倍 * N）
+        confirm_bars = max(1, VOL_LOOKBACK_CONFIRM)
+        if len(vols) < VOL_BASE_WIN + confirm_bars:
+            return False
+
+        base_window = vols[-(VOL_BASE_WIN + confirm_bars):-confirm_bars]
+        if not base_window:
+            return False
+
+        base_med = statistics.median(base_window)
+        recent_sum = sum(vols[-confirm_bars:])
+        if recent_sum < VOL_SPIKE_K * base_med * confirm_bars:
+            return False
+
+        # 4) EMA 多頭過濾
+        need = EMA_SLOW + 10
+        if len(closes) < need:
+            return False
+        seg = closes[-need:]
+        e_fast = ema(seg, EMA_FAST)
+        e_slow = ema(seg, EMA_SLOW)
+        if e_fast is None or e_slow is None or e_fast <= e_slow:
+            return False
+
+        # 5) ATR 有效（僅確認非零）
+        atr = calculate_atr(highs, lows, closes, ATR_PERIOD)
+        if atr is None or atr <= 0:
+            return False
+
+        return True
+
+    except Exception:
+        # 保持安靜，讓外層統一記錄 WARN
         return False

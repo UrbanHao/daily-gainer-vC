@@ -384,7 +384,7 @@ def update_time_offset():
         return TIME_OFFSET_MS # 同步失敗時，維持舊的 offset
 
 # --- Exchange Info (精度規則) ---
-def load_exchange_info():
+def load_exchange_info(force_refresh: bool = False, *_, **__):
     """
     獲取並緩存所有交易對的精度規則。
     (main.py 會在 KeyError 時重新呼叫此函數)

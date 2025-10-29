@@ -160,18 +160,21 @@ def calculate_vbo_short_signal(closes: List[float], highs: List[float], lows: Li
 
 def volume_breakout_ok(symbol: str, interval: str = None) -> bool:
     """
-    與舊版介面相同：只回傳 bool。
-    內部統一用 utils.fetch_klines，且接收 4 個 list，避免「expected 4, got 2」。
+    只回傳是否觸發「多頭量價突破」；不回傳 ATR。
+    內部一律用 fetch_klines 取得 4 個 list（closes/highs/lows/vols）。
     """
+    interval = interval or KLINE_INTERVAL
+
+    # 1) 取得四個 list（這一步是避免再發生「expected 4, got 2/3」）
     try:
-        interval = interval or KLINE_INTERVAL
-
-        # 1) 取 K 線（四個 list）
         closes, highs, lows, vols = fetch_klines(symbol, interval, limit=KLINE_LIMIT)
-        if not closes or not highs or not lows or not vols:
-            return False
+    except Exception:
+        return False
+    if not closes or not highs or not lows or not vols:
+        return False
 
-        # 2) 高點突破（避免過度延伸）
+    # 2) 高點突破且不過度延伸
+    try:
         curr_close = closes[-1]
         if HH_N > 0 and len(highs) > HH_N + 1:
             prev_high = max(highs[-(HH_N + 1):-1])
@@ -179,29 +182,31 @@ def volume_breakout_ok(symbol: str, interval: str = None) -> bool:
             prev_high = highs[-2]
         else:
             return False
-
-        if prev_high <= 0 or curr_close <= prev_high:
+        if curr_close <= prev_high:
             return False
-
-        breakout_ratio = (curr_close - prev_high) / prev_high
+        breakout_ratio = (curr_close - prev_high) / prev_high if prev_high > 0 else 0.0
         if breakout_ratio > OVEREXTEND_CAP:
             return False
+    except Exception:
+        return False
 
-        # 3) 量能條件（最近 N 根總量 > 中位數 * K 倍 * N）
+    # 3) 量能條件：最近 N 根總量 > 中位數 * K 倍 * N
+    try:
         confirm_bars = max(1, VOL_LOOKBACK_CONFIRM)
         if len(vols) < VOL_BASE_WIN + confirm_bars:
             return False
-
         base_window = vols[-(VOL_BASE_WIN + confirm_bars):-confirm_bars]
         if not base_window:
             return False
-
         base_med = statistics.median(base_window)
         recent_sum = sum(vols[-confirm_bars:])
         if recent_sum < VOL_SPIKE_K * base_med * confirm_bars:
             return False
+    except Exception:
+        return False
 
-        # 4) EMA 多頭過濾
+    # 4) EMA 多頭過濾
+    try:
         need = EMA_SLOW + 10
         if len(closes) < need:
             return False
@@ -210,14 +215,15 @@ def volume_breakout_ok(symbol: str, interval: str = None) -> bool:
         e_slow = ema(seg, EMA_SLOW)
         if e_fast is None or e_slow is None or e_fast <= e_slow:
             return False
+    except Exception:
+        return False
 
-        # 5) ATR 有效（僅確認非零）
+    # 5) ATR 有效（僅確認非零）
+    try:
         atr = calculate_atr(highs, lows, closes, ATR_PERIOD)
         if atr is None or atr <= 0:
             return False
-
-        return True
-
     except Exception:
-        # 保持安靜，讓外層統一記錄 WARN
         return False
+
+    return True

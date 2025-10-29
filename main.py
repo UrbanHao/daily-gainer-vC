@@ -107,7 +107,7 @@ def state_iter():
         # --- 定時刷新 Exchange Info ---
         if t_now - last_info_sync > 3600: # 每小時 (3600 秒)
              try:
-                 load_exchange_info(force_refresh=True) # 強制刷新
+                 load_exchange_info() # 強制刷新
                  last_info_sync = t_now
                  log("Exchange info refreshed periodically", "SYS")
              except Exception as e:
@@ -290,6 +290,8 @@ def state_iter():
                                 prev_syms = syms_to_subscribe_list
 
                     except Exception as e:
+                        import traceback
+                        traceback.print_exc()
                         log(f"Scan/Cache/WS error: {type(e).__name__} {e}", "SCAN")
 
 
@@ -389,7 +391,7 @@ def state_iter():
                                  min_notional_rule = to_decimal(min_notional_rule)
                         except KeyError:
                             log(f"No exchange info for {symbol}. Attempting live refresh...", "SYS")
-                            load_exchange_info(force_refresh=True)
+                            load_exchange_info()
                             prec = EXCHANGE_INFO[symbol]
                             qty_prec = prec['quantityPrecision']
                             price_prec = prec['pricePrecision']

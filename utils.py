@@ -8,12 +8,14 @@ import math, random
 # 移除 MIN_NOTIONAL_FALLBACK 的 import，改從 config 讀
 from config import BINANCE_FUTURES_BASE, BINANCE_FUTURES_TEST_BASE, USE_TESTNET, SYMBOL_BLACKLIST, MIN_NOTIONAL_FALLBACK
 from typing import List, Optional
+from typing import Dict, Any
 from decimal import Decimal, ROUND_DOWN, ROUND_UP, InvalidOperation # <-- 新增 Decimal
 
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": "daily-gainer-bot/vC"})
 SESSION.headers.update({"Cache-Control": "no-cache"})
 EXCLUDE_KEYWORDS = ("UPUSDT", "DOWNUSDT", "BULLUSDT", "BEARUSDT", "BUSD")
+_KLINES_CACHE = {}  # key=(symbol, interval, limit) -> (ts, (closes, highs, lows, vols))
 
 # --- Binance REST endpoints（期貨 FAPI） ---
 _BINANCE_FAPI_BASES = [
@@ -38,38 +40,86 @@ def _choose_endpoint(path: str) -> str:
         return base + path
     return f"{base}/{path}"
 
-def _request_json(session, method: str, path: str, params=None, max_retry: int = 3, timeout: float = 10.0):
+SESSION = requests.Session()
+_BASES = ["https://fapi1.binance.com", "https://fapi2.binance.com"]
+_base_idx = 0
+
+def _rest_json(path: str, params: Dict[str, Any] = None, timeout: float = 8.0, tries: int = 6) -> Dict[str, Any]:
     """
-    小型請求器：處理 202/429/5xx，自動換 endpoint 重試。
-    與你現有呼叫點相容：用 path 丟進來即可（例如 '/fapi/v1/ticker/24hr'）。
+    穩健 REST：多 host 輪詢 + 202/429/418 重試 + 抽樣降噪 + 指數退避 + Retry-After 尊重
     """
-    for attempt in range(max_retry):
-        url = _choose_endpoint(path)
+    global _base_idx
+    params = params or {}
+    last_exc = None
+    backoff = 0.4
+
+    for attempt in range(tries):
+        base = _BASES[_base_idx % len(_BASES)]
+        url = f"{base}{path}"
         try:
-            r = session.request(method, url, params=params, timeout=timeout)
-        except Exception:
-            # 網路錯誤 -> 短暫睡一下再換下一個 endpoint
-            time.sleep(0.2 + 0.3 * attempt)
+            resp = SESSION.get(url, params=params, timeout=timeout)
+            # ----- 正常 2xx -----
+            if 200 <= resp.status_code < 300:
+                # 202: 後端忙，當成暫時失敗；抽樣 10% 印 log，並 jitter
+                if resp.status_code == 202:
+                    if random.random() < 0.10:
+                        print(f"Warning: Received 202 Accepted from {url}. Treating as temporary failure, retrying...")
+                    time.sleep(0.25 + 0.35 * random.random())
+                    # 輪下一個 base
+                    _base_idx += 1
+                    continue
+                return resp.json()
+
+            # ----- 429: Rate limit -----
+            if resp.status_code == 429:
+                ra = resp.headers.get("Retry-After") or resp.headers.get("x-mbx-retry-after")
+                used_weight = resp.headers.get("X-MBX-USED-WEIGHT-1M")
+                if ra:
+                    try:
+                        # 幣安有時是毫秒、有時是秒；>1000 當毫秒處理
+                        ra_f = float(ra)
+                        sleep_s = ra_f / 1000.0 if ra_f > 1000 else ra_f
+                        print(f"Warning: 429 from {url}. Retry-After={sleep_s:.2f}s (used-weight-1m={used_weight}).")
+                        time.sleep(sleep_s + 0.25 * random.random())
+                    except Exception:
+                        pass
+                else:
+                    # 沒給 Retry-After 就指數退避
+                    sleep_s = min(8.0, backoff * (2 ** attempt)) + 0.25 * random.random()
+                    print(f"Warning: 429 from {url}. Backing off {sleep_s:.2f}s.")
+                    time.sleep(sleep_s)
+                _base_idx += 1
+                continue
+
+            # ----- 418: IP 被暫時封（Too many requests）-----
+            if resp.status_code == 418:
+                print(f"Warning: 418 (IP temp banned) from {url}. Sleeping 60s.")
+                time.sleep(60.0 + 2.0 * random.random())
+                _base_idx += 1
+                continue
+
+            # 其他 5xx/4xx：簡單退避 + 換 host
+            if 500 <= resp.status_code < 600 or 400 <= resp.status_code < 500:
+                sleep_s = min(6.0, backoff * (1.8 ** attempt)) + 0.2 * random.random()
+                print(f"Warning: HTTP {resp.status_code} from {url}. Backing off {sleep_s:.2f}s.")
+                time.sleep(sleep_s)
+                _base_idx += 1
+                last_exc = requests.HTTPError(f"{resp.status_code} {resp.text}")
+                continue
+
+        except requests.RequestException as e:
+            # 網路層異常（含你看到的 too many 429 的聚合錯誤）
+            print(f"Warning: Network error contacting {base}: {e}")
+            sleep_s = min(6.0, backoff * (1.8 ** attempt)) + 0.2 * random.random()
+            time.sleep(sleep_s)
+            _base_idx += 1
+            last_exc = e
             continue
 
-        # 正常
-        if r.status_code == 200:
-            return r.json()
-
-        # 常見暫時性狀態：202/429/5xx -> 換 endpoint 重試
-        if r.status_code in (202, 429) or 500 <= r.status_code < 600:
-            print(f"Warning: Received {r.status_code} from {url}. Treating as temporary failure, retrying...")
-            time.sleep(0.2 + 0.3 * attempt)
-            continue
-
-        # 其他狀態碼（例如 4xx 非 429）直接 raise
-        try:
-            r.raise_for_status()
-        except Exception as e:
-            raise e
-
-    # 超過重試次數
-    raise RuntimeError(f"Request failed after {max_retry} retries for path={path}")
+    # 全部重試失敗
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"_rest_json failed for {path}")
 # --- 全域變數 ---
 TIME_OFFSET_MS = 0 # 時間偏移
 EXCHANGE_INFO = {} # 精度規則
@@ -146,54 +196,29 @@ import time, random
 _KLINE_CACHE = {}
 _KLINE_CACHE_TTL = 20.0  # 成功資料可沿用 20 秒，避免 202 時瘋狂打 API
 
-def fetch_klines(symbol, interval, limit):
+def fetch_klines(symbol: str, interval: str, limit: int):
     """
-    回傳四個 list: closes, highs, lows, vols
-    - 先看快取（20 秒內）直接回
-    - 若 API 回 202/429/5xx，最多重試 2 次；若仍失敗但有快取 → 回快取
-      沒快取才 raise 讓呼叫端略過該檔
+    回傳 (closes, highs, lows, vols)；含 30 秒 TTL 快取降低 429。
     """
-    cache_key = (symbol, interval)
+    import time
+    key = (symbol, interval, int(limit))
     now = time.time()
+    rec = _KLINES_CACHE.get(key)
+    if rec and (now - rec[0] < 30.0):
+        return rec[1]
 
-    # 1) 有新鮮快取 → 直接回
-    if cache_key in _KLINE_CACHE:
-        c = _KLINE_CACHE[cache_key]
-        if now - c["ts"] <= _KLINE_CACHE_TTL:
-            return c["data"]
+    data = _rest_json("/fapi/v1/klines", params={
+        "symbol": symbol, "interval": interval, "limit": limit
+    }, tries=6)
 
-    # 2) 打公開 REST（用你現成的 _rest_json；限制 tries=2；加一點隨機抖動）
-    #    注意：_rest_json 的 path 只放 path，底層會自己輪詢 base host
-    params = {"symbol": symbol, "interval": interval, "limit": int(limit)}
-    # 小抖動，避免同時間全打到同一主機
-    time.sleep(0.05 + random.random() * 0.05)
+    closes = [float(x[4]) for x in data]
+    highs  = [float(x[2]) for x in data]
+    lows   = [float(x[3]) for x in data]
+    vols   = [float(x[5]) for x in data]
 
-    data = None
-    try:
-        data = _rest_json("/fapi/v1/klines", params=params, timeout=5, tries=2)
-    except Exception:
-        # 若 API 失敗但有舊快取，回舊快取；否則往上拋
-        if cache_key in _KLINE_CACHE:
-            return _KLINE_CACHE[cache_key]["data"]
-        raise
-
-    # 3) 解析成四個 list（保留你原本四清單約定）
-    try:
-        closes = [float(x[4]) for x in data]
-        highs  = [float(x[2]) for x in data]
-        lows   = [float(x[3]) for x in data]
-        vols   = [float(x[5]) for x in data]
-    except Exception as e:
-        # 解析失敗：若有舊快取則回舊快取；否則拋出
-        if cache_key in _KLINE_CACHE:
-            return _KLINE_CACHE[cache_key]["data"]
-        raise e
-
-    out = (closes, highs, lows, vols)
-
-    # 4) 寫入快取
-    _KLINE_CACHE[cache_key] = {"ts": now, "data": out}
-    return out
+    tup = (closes, highs, lows, vols)
+    _KLINES_CACHE[key] = (now, tup)
+    return tup
 
 
 def ema(vals, n):

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime
 from decimal import Decimal, InvalidOperation # <-- 保留 Decimal
-import time, os
+import time, os, random
 from dotenv import load_dotenv
 
 from config import (USE_WEBSOCKET, USE_TESTNET, USE_LIVE, SCAN_INTERVAL_S, DAILY_TARGET_PCT, DAILY_LOSS_CAP,
@@ -210,64 +210,92 @@ def state_iter():
         else:
             if not day.state.halted:
                 # --- (修改) 掃描 & 更新 VBO 快取 (API 優化版) ---
-                if not paused["scan"] and (t_now - last_scan > SCAN_INTERVAL_S):
+                EFFECTIVE_SCAN_INTERVAL = max(SCAN_INTERVAL_S, 12)  # 至少 12 秒
+                # ⚠️ 修正你多一個冒號的語法錯誤（這行不能有兩個冒號）
+                if not paused["scan"] and (t_now - last_scan > EFFECTIVE_SCAN_INTERVAL):
                     try:
-                        top_gainers_list = fetch_top_gainers(SCAN_TOP_N) # Step 1: Get Gainers (1 API call)
-                        top_losers_list = fetch_top_losers(SCAN_TOP_N) if ALLOW_SHORT else [] # Step 2: Get Losers (1 API call)
+                        # Step 1: 拉當下漲/跌幅榜（各 1 次 API）
+                        top_gainers_list = fetch_top_gainers(SCAN_TOP_N)
+                        top_losers_list  = fetch_top_losers(SCAN_TOP_N) if ALLOW_SHORT else []
                         last_scan = t_now
 
-                        # 合併漲跌幅榜，去重，準備處理 VBO
+                        # Step 2: 合併、去重（dict 以 symbol 當 key）
                         all_symbols_to_check = {}
                         for (s, pct, last, vol) in top_gainers_list:
                             all_symbols_to_check[s] = (s, pct, last, vol)
-                        for (s, pct, last, vol) in top_losers_list:
-                            all_symbols_to_check[s] = (s, pct, last, vol)
+                        if ALLOW_SHORT:
+                            for (s, pct, last, vol) in top_losers_list:
+                                all_symbols_to_check[s] = (s, pct, last, vol)
+
+                        # Step 3: 限制本輪最多處理 12 檔，避免瞬間打爆 REST
+                        MAX_KLINES_PER_SCAN = 12
+                        symbols_to_process = list(all_symbols_to_check.keys())[:MAX_KLINES_PER_SCAN]
 
                         new_cache = {}
                         symbols_for_ws = set()
                         symbols_processed_count = 0
-                        # 只處理一小批，其他留到下輪（例如每輪最多 12 檔）
-                        SYMBOLS_PER_SCAN = 12
-                        symbols_batch = list(all_symbols_to_check.values())[:SYMBOLS_PER_SCAN]
 
-                        # --- 先抓一次 K 線，再計算訊號 ---
-                        for idx, (symbol, pct, last, vol) in enumerate(symbols_batch):
-                            symbols_for_ws.add(symbol)
+                        # Step 4: 一檔一檔抓 K 線→算訊號（含輕微抖動）
+                        for symbol in symbols_to_process:
+                            (sym, pct, last, vol) = all_symbols_to_check[symbol]
+                            symbols_for_ws.add(sym)
 
                             long_ok = False
                             short_ok = False
                             atr_value = None
 
                             try:
-                                # 只打一次 REST
-                                closes, highs, lows, vols = fetch_klines(symbol, KLINE_INTERVAL, KLINE_LIMIT)
-
-                                # 訊號計算（沿用你現有函式）
+                                closes, highs, lows, vols = fetch_klines(sym, KLINE_INTERVAL, KLINE_LIMIT)
                                 long_ok, atr_long = calculate_vbo_long_signal(closes, highs, lows, vols)
                                 short_ok, atr_short = (calculate_vbo_short_signal(closes, highs, lows, vols)
                                                        if ALLOW_SHORT else (False, None))
-
-                                # 只保留有效 ATR
                                 atr_value = atr_long if (atr_long is not None and atr_long > 0) \
                                            else (atr_short if (atr_short is not None and atr_short > 0) else None)
-
                                 symbols_processed_count += 1
-
                             except Exception as fetch_e:
-                                log(f"Error fetching/processing klines for {symbol}: {fetch_e}", "WARN")
+                                log(f"Error fetching/processing klines for {sym}: {fetch_e}", "WARN")
 
-                            new_cache[symbol] = {
-                                "long": long_ok,
-                                "short": short_ok,
-                                "atr": atr_value
-                            }
+                            new_cache[sym] = {"long": bool(long_ok), "short": bool(short_ok), "atr": atr_value}
 
-                            # 對每個 symbol 做輕微延遲（維持你原本節流）
-                            time.sleep(0.06 + random.random() * 0.04)  # 0.06~0.10 秒不等
+                            # 抖動 0.06~0.10 秒，降低 429 機率
+                            time.sleep(0.06 + 0.04 * random.random())
 
                         vbo_cache = new_cache
-                        log(f"VBO cache updated for {symbols_processed_count}/{len(all_symbols_to_check)} symbols.", "SCAN")
+                        log(f"VBO cache updated for {symbols_processed_count}/{len(symbols_to_process)} symbols.", "SCAN")
                         # --- 核心修改結束 ---
+
+                        # --- WebSocket 訂閱管理（跟著本輪處理的 symbols 對齊） ---
+                        if USE_WEBSOCKET:
+                            current_position_sym = None  # 無持倉
+                            syms_to_subscribe_set = set(symbols_for_ws)
+
+                            current_set_to_subscribe = syms_to_subscribe_set
+                            previous_subscribed_set = set(prev_syms)
+                            symbols_changed_count = len(current_set_to_subscribe.symmetric_difference(previous_subscribed_set))
+                            RELOAD_THRESHOLD = 5
+
+                            needs_restart = False
+                            if current_set_to_subscribe != previous_subscribed_set:
+                                if not prev_syms:
+                                    needs_restart = True
+                                    print("DEBUG: First WebSocket subscription.")
+                                elif symbols_changed_count > RELOAD_THRESHOLD:
+                                    needs_restart = True
+                                    print(f"DEBUG: Symbol set changed significantly ({symbols_changed_count} changes > {RELOAD_THRESHOLD}). Reloading WebSocket.")
+                                    diff_added = current_set_to_subscribe - previous_subscribed_set
+                                    diff_removed = previous_subscribed_set - current_set_to_subscribe
+                                    if diff_added:  print(f"DEBUG: Added symbols: {diff_added}")
+                                    if diff_removed: print(f"DEBUG: Removed symbols: {diff_removed}")
+
+                            if needs_restart:
+                                syms_to_subscribe_list = sorted(list(current_set_to_subscribe))
+                                start_ws(syms_to_subscribe_list, USE_TESTNET)
+                                prev_syms = syms_to_subscribe_list
+
+                    except Exception as e:
+                        import traceback
+                        traceback.print_exc()
+                        log(f"Scan/Cache/WS error: {type(e).__name__} {e}", "SCAN")
 
                         # --- WebSocket 訂閱管理 ---
                         if USE_WEBSOCKET:

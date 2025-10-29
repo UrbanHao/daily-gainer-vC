@@ -6,8 +6,9 @@ import time, os
 from dotenv import load_dotenv
 
 from config import (USE_WEBSOCKET, USE_TESTNET, USE_LIVE, SCAN_INTERVAL_S, DAILY_TARGET_PCT, DAILY_LOSS_CAP,
-                    PER_TRADE_RISK, SCAN_TOP_N, ALLOW_SHORT, # <-- 保留 ALLOW_SHORT
-                    LARGE_TRADES_EARLY_EXIT_PCT, MIN_NOTIONAL_FALLBACK)
+                    PER_TRADE_RISK, SCAN_TOP_N, ALLOW_SHORT,
+                    LARGE_TRADES_EARLY_EXIT_PCT, MIN_NOTIONAL_FALLBACK,
+                    KLINE_INTERVAL, KLINE_LIMIT)
 # (修改) 加入 fetch_klines 和 fetch_top_losers
 from utils import fetch_top_gainers, fetch_top_losers, SESSION, fetch_klines
 from risk_frame import DayGuard, position_size_notional, compute_bracket # (保留 ATR 版本)
@@ -216,35 +217,41 @@ def state_iter():
                         last_scan = t_now
 
                         # 合併漲跌幅榜，去重，準備處理 VBO
-                        all_symbols_to_check = {s[0]: s for s in top_gainers_list}
-                        all_symbols_to_check.update({s[0]: s for s in top_losers_list})
-                        
+                        all_symbols_to_check = {}
+                        for (s, pct, last, vol) in top_gainers_list:
+                            all_symbols_to_check[s] = (s, pct, last, vol)
+                        for (s, pct, last, vol) in top_losers_list:
+                            all_symbols_to_check[s] = (s, pct, last, vol)
+
                         new_cache = {}
                         symbols_for_ws = set()
                         symbols_processed_count = 0
-                        
-                        # --- 核心修改：先獲取 K 線，再計算訊號 ---
-                        for s, (symbol, pct, last, vol) in enumerate(all_symbols_to_check.items()):
+
+                        # --- 先抓一次 K 線，再計算訊號（不再觸發「expected 4, got 2」） ---
+                        for idx, (symbol, pct, last, vol) in enumerate(all_symbols_to_check.values()):
                             symbols_for_ws.add(symbol)
-                            klines_data = None
-                            atr_value = None
+
                             long_ok = False
                             short_ok = False
-                            
+                            atr_value = None
+
                             try:
-                                # Step 3: Fetch K-lines ONCE per symbol
+                                # 只打一次 REST
                                 closes, highs, lows, vols = fetch_klines(symbol, KLINE_INTERVAL, KLINE_LIMIT)
-                                klines_data = (closes, highs, lows, vols)
-                                
-                                # Step 4: Calculate signals using the fetched data (NO API calls)
-                                long_ok, atr_long = calculate_vbo_long_signal(*klines_data)
-                                short_ok, atr_short = calculate_vbo_short_signal(*klines_data) if ALLOW_SHORT else (False, None)
-                                
-                                atr_value = atr_long if atr_long is not None and atr_long > 0 else (atr_short if atr_short is not None and atr_short > 0 else None)
+
+                                # 訊號計算（沿用你現有函式）
+                                long_ok, atr_long = calculate_vbo_long_signal(closes, highs, lows, vols)
+                                short_ok, atr_short = (calculate_vbo_short_signal(closes, highs, lows, vols)
+                                                       if ALLOW_SHORT else (False, None))
+
+                                # 只保留有效 ATR
+                                atr_value = atr_long if (atr_long is not None and atr_long > 0) \
+                                           else (atr_short if (atr_short is not None and atr_short > 0) else None)
+
                                 symbols_processed_count += 1
-                                
+
                             except Exception as fetch_e:
-                                 log(f"Error fetching/processing klines for {symbol}: {fetch_e}", "WARN")
+                                log(f"Error fetching/processing klines for {symbol}: {fetch_e}", "WARN")
 
                             new_cache[symbol] = {
                                 "long": long_ok,
@@ -252,8 +259,8 @@ def state_iter():
                                 "atr": atr_value
                             }
 
-                            # Step 5: Add delay AFTER processing each symbol
-                            time.sleep(0.3) # <--- 保持延遲 (0.3 * 20 = 6 秒)
+                            # 對每個 symbol 做輕微延遲（維持你原本節流）
+                            time.sleep(0.3)
 
                         vbo_cache = new_cache
                         log(f"VBO cache updated for {symbols_processed_count}/{len(all_symbols_to_check)} symbols.", "SCAN")
